@@ -1,0 +1,23 @@
+# 编译产物
+*.exe
+*.o
+*.obj
+*.dll
+*.so
+
+# 数据输出
+Experiment/data_b2/*.csv
+Experiment/data_b2/mini*.csv
+
+# 调试临时文件
+debug_*.exe
+debug_*.o
+
+# IDE
+.vscode/
+.vs/
+*.swp
+
+# 系统
+.DS_Store
+Thumbs.db

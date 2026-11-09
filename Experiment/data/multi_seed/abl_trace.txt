@@ -1,0 +1,180 @@
+﻿=== Benchmark-1: Single-Synapse Delayed Credit Assignment ===
+Config: S_A=50 S_B=50 H=400 O_A=25 O_B=25 Delay=200 Trials=500 Seed=1
+El Trace: OFF (ABLATION), Reward Mod: ON
+Network initialized: 550 neurons, 4000 synapses
+  Trial 200/500 | Train Acc: 100.0% | Test Acc (so far): 0.0%
+  Trial 400/500 | Train Acc: 100.0% | Test Acc (so far): 100.0%
+
+=== FINAL RESULTS ===
+Overall Accuracy:  100.00%
+Train Accuracy:    100.00% (250/250)
+Test Accuracy:     100.00% (250/250)
+Total ticks:       22701
+Output file:       data\multi_seed\abl_trace_1.csv
+
+=== PASS CRITERIA CHECK ===
+[PASS] Test accuracy 100.00% >= 80%
+
+RESULT: PASS (run ablations next)
+=== Benchmark-1: Single-Synapse Delayed Credit Assignment ===
+Config: S_A=50 S_B=50 H=400 O_A=25 O_B=25 Delay=200 Trials=500 Seed=2
+El Trace: OFF (ABLATION), Reward Mod: ON
+Network initialized: 550 neurons, 4000 synapses
+  Trial 200/500 | Train Acc: 100.0% | Test Acc (so far): 0.0%
+  Trial 400/500 | Train Acc: 100.0% | Test Acc (so far): 100.0%
+
+=== FINAL RESULTS ===
+Overall Accuracy:  100.00%
+Train Accuracy:    100.00% (250/250)
+Test Accuracy:     100.00% (250/250)
+Total ticks:       22701
+Output file:       data\multi_seed\abl_trace_2.csv
+
+=== PASS CRITERIA CHECK ===
+[PASS] Test accuracy 100.00% >= 80%
+
+RESULT: PASS (run ablations next)
+=== Benchmark-1: Single-Synapse Delayed Credit Assignment ===
+Config: S_A=50 S_B=50 H=400 O_A=25 O_B=25 Delay=200 Trials=500 Seed=3
+El Trace: OFF (ABLATION), Reward Mod: ON
+Network initialized: 550 neurons, 4000 synapses
+  Trial 200/500 | Train Acc: 100.0% | Test Acc (so far): 0.0%
+  Trial 400/500 | Train Acc: 100.0% | Test Acc (so far): 100.0%
+
+=== FINAL RESULTS ===
+Overall Accuracy:  100.00%
+Train Accuracy:    100.00% (250/250)
+Test Accuracy:     100.00% (250/250)
+Total ticks:       22701
+Output file:       data\multi_seed\abl_trace_3.csv
+
+=== PASS CRITERIA CHECK ===
+[PASS] Test accuracy 100.00% >= 80%
+
+RESULT: PASS (run ablations next)
+=== Benchmark-1: Single-Synapse Delayed Credit Assignment ===
+Config: S_A=50 S_B=50 H=400 O_A=25 O_B=25 Delay=200 Trials=500 Seed=4
+El Trace: OFF (ABLATION), Reward Mod: ON
+Network initialized: 550 neurons, 4000 synapses
+  Trial 200/500 | Train Acc: 100.0% | Test Acc (so far): 0.0%
+  Trial 400/500 | Train Acc: 100.0% | Test Acc (so far): 100.0%
+
+=== FINAL RESULTS ===
+Overall Accuracy:  100.00%
+Train Accuracy:    100.00% (250/250)
+Test Accuracy:     100.00% (250/250)
+Total ticks:       22701
+Output file:       data\multi_seed\abl_trace_4.csv
+
+=== PASS CRITERIA CHECK ===
+[PASS] Test accuracy 100.00% >= 80%
+
+RESULT: PASS (run ablations next)
+=== Benchmark-1: Single-Synapse Delayed Credit Assignment ===
+Config: S_A=50 S_B=50 H=400 O_A=25 O_B=25 Delay=200 Trials=500 Seed=5
+El Trace: OFF (ABLATION), Reward Mod: ON
+Network initialized: 550 neurons, 4000 synapses
+  Trial 200/500 | Train Acc: 100.0% | Test Acc (so far): 0.0%
+  Trial 400/500 | Train Acc: 100.0% | Test Acc (so far): 100.0%
+
+=== FINAL RESULTS ===
+Overall Accuracy:  100.00%
+Train Accuracy:    100.00% (250/250)
+Test Accuracy:     100.00% (250/250)
+Total ticks:       22701
+Output file:       data\multi_seed\abl_trace_5.csv
+
+=== PASS CRITERIA CHECK ===
+[PASS] Test accuracy 100.00% >= 80%
+
+RESULT: PASS (run ablations next)
+=== Benchmark-1: Single-Synapse Delayed Credit Assignment ===
+Config: S_A=50 S_B=50 H=400 O_A=25 O_B=25 Delay=200 Trials=500 Seed=6
+El Trace: OFF (ABLATION), Reward Mod: ON
+Network initialized: 550 neurons, 4000 synapses
+  Trial 200/500 | Train Acc: 100.0% | Test Acc (so far): 0.0%
+  Trial 400/500 | Train Acc: 100.0% | Test Acc (so far): 100.0%
+
+=== FINAL RESULTS ===
+Overall Accuracy:  100.00%
+Train Accuracy:    100.00% (250/250)
+Test Accuracy:     100.00% (250/250)
+Total ticks:       22701
+Output file:       data\multi_seed\abl_trace_6.csv
+
+=== PASS CRITERIA CHECK ===
+[PASS] Test accuracy 100.00% >= 80%
+
+RESULT: PASS (run ablations next)
+=== Benchmark-1: Single-Synapse Delayed Credit Assignment ===
+Config: S_A=50 S_B=50 H=400 O_A=25 O_B=25 Delay=200 Trials=500 Seed=7
+El Trace: OFF (ABLATION), Reward Mod: ON
+Network initialized: 550 neurons, 4000 synapses
+  Trial 200/500 | Train Acc: 100.0% | Test Acc (so far): 0.0%
+  Trial 400/500 | Train Acc: 100.0% | Test Acc (so far): 100.0%
+
+=== FINAL RESULTS ===
+Overall Accuracy:  100.00%
+Train Accuracy:    100.00% (250/250)
+Test Accuracy:     100.00% (250/250)
+Total ticks:       22701
+Output file:       data\multi_seed\abl_trace_7.csv
+
+=== PASS CRITERIA CHECK ===
+[PASS] Test accuracy 100.00% >= 80%
+
+RESULT: PASS (run ablations next)
+=== Benchmark-1: Single-Synapse Delayed Credit Assignment ===
+Config: S_A=50 S_B=50 H=400 O_A=25 O_B=25 Delay=200 Trials=500 Seed=8
+El Trace: OFF (ABLATION), Reward Mod: ON
+Network initialized: 550 neurons, 4000 synapses
+  Trial 200/500 | Train Acc: 100.0% | Test Acc (so far): 0.0%
+  Trial 400/500 | Train Acc: 100.0% | Test Acc (so far): 100.0%
+
+=== FINAL RESULTS ===
+Overall Accuracy:  100.00%
+Train Accuracy:    100.00% (250/250)
+Test Accuracy:     100.00% (250/250)
+Total ticks:       22701
+Output file:       data\multi_seed\abl_trace_8.csv
+
+=== PASS CRITERIA CHECK ===
+[PASS] Test accuracy 100.00% >= 80%
+
+RESULT: PASS (run ablations next)
+=== Benchmark-1: Single-Synapse Delayed Credit Assignment ===
+Config: S_A=50 S_B=50 H=400 O_A=25 O_B=25 Delay=200 Trials=500 Seed=9
+El Trace: OFF (ABLATION), Reward Mod: ON
+Network initialized: 550 neurons, 4000 synapses
+  Trial 200/500 | Train Acc: 100.0% | Test Acc (so far): 0.0%
+  Trial 400/500 | Train Acc: 100.0% | Test Acc (so far): 100.0%
+
+=== FINAL RESULTS ===
+Overall Accuracy:  100.00%
+Train Accuracy:    100.00% (250/250)
+Test Accuracy:     100.00% (250/250)
+Total ticks:       22701
+Output file:       data\multi_seed\abl_trace_9.csv
+
+=== PASS CRITERIA CHECK ===
+[PASS] Test accuracy 100.00% >= 80%
+
+RESULT: PASS (run ablations next)
+=== Benchmark-1: Single-Synapse Delayed Credit Assignment ===
+Config: S_A=50 S_B=50 H=400 O_A=25 O_B=25 Delay=200 Trials=500 Seed=10
+El Trace: OFF (ABLATION), Reward Mod: ON
+Network initialized: 550 neurons, 4000 synapses
+  Trial 200/500 | Train Acc: 100.0% | Test Acc (so far): 0.0%
+  Trial 400/500 | Train Acc: 100.0% | Test Acc (so far): 100.0%
+
+=== FINAL RESULTS ===
+Overall Accuracy:  100.00%
+Train Accuracy:    100.00% (250/250)
+Test Accuracy:     100.00% (250/250)
+Total ticks:       22701
+Output file:       data\multi_seed\abl_trace_10.csv
+
+=== PASS CRITERIA CHECK ===
+[PASS] Test accuracy 100.00% >= 80%
+
+RESULT: PASS (run ablations next)
