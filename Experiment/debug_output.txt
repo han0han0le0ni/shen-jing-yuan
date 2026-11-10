@@ -1,0 +1,127 @@
+﻿.\benchmark2.exe : [REWARD_DEBUG #0] tick=52 reward=0.3877 baseline=0.0000 err=0.3877 nonzero_trace=37855/39871 trace_s
+um=7296.2878
+所在位置 行:15 字符: 1959
++ ... xperiment"; .\benchmark2.exe --episodes 100 --seed 42 *> debug_output ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: ([REWARD_DEBUG #...e_sum=7296.2878:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+  MAX_TRACE syn[955]: w=2.6977 trace=-1.000000 dw=-0.007753 pre_t=48 post_t=1982
+[REWARD_DEBUG #1] tick=102 reward=-2.3300 baseline=0.3877 err=-2.7177 nonzero_trace=37942/39871 trace_sum=10359.1501
+  MAX_TRACE syn[955]: w=2.6899 trace=-1.000000 dw=0.054353 pre_t=48 post_t=1982
+[REWARD_DEBUG #2] tick=152 reward=-0.1326 baseline=-0.9712 err=0.8386 nonzero_trace=37958/39871 trace_sum=12510.4440
+  MAX_TRACE syn[955]: w=2.7443 trace=-1.000000 dw=-0.016771 pre_t=48 post_t=1982
+=== Benchmark-2: 2-Joint Reaching ===
+Config: in=100 h=2000 m1=50 m2=50 episodes=100 ticks/ep=1000 seed=42
+Net: 2200 neurons, 39871 synapses
+  Ep  0 | target=(1.50,0.50) | init=0.707 final=1.561 ratio=2.207 reward=0.220
+  Ep  1 | target=(1.50,0.50) | init=0.707 final=1.561 ratio=2.207 reward=0.220
+  Ep  2 | target=(1.50,0.50) | init=0.707 final=1.878 ratio=2.656 reward=0.061
+  Ep  3 | target=(1.50,0.50) | init=0.707 final=3.445 ratio=4.872 reward=0.000
+  Ep  4 | target=(1.50,0.50) | init=0.707 final=1.561 ratio=2.207 reward=0.220
+  Ep  5 | target=(1.50,0.50) | init=0.707 final=2.962 ratio=4.190 reward=0.000
+  Ep  6 | target=(1.50,0.50) | init=0.707 final=1.563 ratio=2.210 reward=0.219
+  Ep  7 | target=(1.50,0.50) | init=0.707 final=1.743 ratio=2.465 reward=0.129
+  Ep  8 | target=(1.50,0.50) | init=0.707 final=1.809 ratio=2.559 reward=0.095
+  Ep  9 | target=(1.50,0.50) | init=0.707 final=3.134 ratio=4.433 reward=0.000
+  Ep 10 | target=(1.50,0.50) | init=0.707 final=2.462 ratio=3.481 reward=0.000
+  Ep 11 | target=(1.50,0.50) | init=0.707 final=1.563 ratio=2.210 reward=0.219
+  Ep 12 | target=(1.50,0.50) | init=0.707 final=3.382 ratio=4.783 reward=0.000
+  Ep 13 | target=(1.50,0.50) | init=0.707 final=1.958 ratio=2.769 reward=0.021
+  Ep 14 | target=(1.50,0.50) | init=0.707 final=1.882 ratio=2.661 reward=0.059
+  Ep 15 | target=(1.50,0.50) | init=0.707 final=1.563 ratio=2.210 reward=0.219
+  Ep 16 | target=(1.50,0.50) | init=0.707 final=1.563 ratio=2.210 reward=0.219
+  Ep 17 | target=(1.50,0.50) | init=0.707 final=1.356 ratio=1.917 reward=0.322
+  Ep 18 | target=(1.50,0.50) | init=0.707 final=1.940 ratio=2.744 reward=0.030
+  Ep 19 | target=(1.50,0.50) | init=0.707 final=2.692 ratio=3.808 reward=0.000
+  Ep 20 | target=(1.50,0.50) | init=0.707 final=1.563 ratio=2.210 reward=0.219
+  Ep 21 | target=(1.50,0.50) | init=0.707 final=1.721 ratio=2.434 reward=0.140
+  Ep 22 | target=(1.50,0.50) | init=0.707 final=3.314 ratio=4.686 reward=0.000
+  Ep 23 | target=(1.50,0.50) | init=0.707 final=3.361 ratio=4.753 reward=0.000
+  Ep 24 | target=(1.50,0.50) | init=0.707 final=1.903 ratio=2.692 reward=0.048
+  Ep 25 | target=(1.50,0.50) | init=0.707 final=1.563 ratio=2.210 reward=0.219
+  Ep 26 | target=(1.50,0.50) | init=0.707 final=1.563 ratio=2.210 reward=0.219
+  Ep 27 | target=(1.50,0.50) | init=0.707 final=1.736 ratio=2.455 reward=0.132
+  Ep 28 | target=(1.50,0.50) | init=0.707 final=1.677 ratio=2.372 reward=0.161
+  Ep 29 | target=(1.50,0.50) | init=0.707 final=1.995 ratio=2.822 reward=0.002
+  Ep 30 | target=(1.50,0.50) | init=0.707 final=1.565 ratio=2.214 reward=0.217
+  Ep 31 | target=(1.50,0.50) | init=0.707 final=1.561 ratio=2.207 reward=0.220
+  Ep 32 | target=(1.50,0.50) | init=0.707 final=1.820 ratio=2.573 reward=0.090
+  Ep 33 | target=(1.50,0.50) | init=0.707 final=1.277 ratio=1.805 reward=0.362
+  Ep 34 | target=(1.50,0.50) | init=0.707 final=1.983 ratio=2.805 reward=0.008
+  Ep 35 | target=(1.50,0.50) | init=0.707 final=3.401 ratio=4.810 reward=0.000
+  Ep 36 | target=(1.50,0.50) | init=0.707 final=1.563 ratio=2.210 reward=0.219
+  Ep 37 | target=(1.50,0.50) | init=0.707 final=1.831 ratio=2.589 reward=0.084
+  Ep 38 | target=(1.50,0.50) | init=0.707 final=1.877 ratio=2.655 reward=0.061
+  Ep 39 | target=(1.50,0.50) | init=0.707 final=3.562 ratio=5.037 reward=0.000
+  Ep 40 | target=(1.50,0.50) | init=0.707 final=1.814 ratio=2.565 reward=0.093
+  Ep 41 | target=(1.50,0.50) | init=0.707 final=3.251 ratio=4.597 reward=0.000
+  Ep 42 | target=(1.50,0.50) | init=0.707 final=1.562 ratio=2.209 reward=0.219
+  Ep 43 | target=(1.50,0.50) | init=0.707 final=3.183 ratio=4.502 reward=0.000
+  Ep 44 | target=(1.50,0.50) | init=0.707 final=2.770 ratio=3.917 reward=0.000
+  Ep 45 | target=(1.50,0.50) | init=0.707 final=1.563 ratio=2.210 reward=0.219
+  Ep 46 | target=(1.50,0.50) | init=0.707 final=3.237 ratio=4.577 reward=0.000
+  Ep 47 | target=(1.50,0.50) | init=0.707 final=3.144 ratio=4.447 reward=0.000
+  Ep 48 | target=(1.50,0.50) | init=0.707 final=3.496 ratio=4.945 reward=0.000
+  Ep 49 | target=(1.50,0.50) | init=0.707 final=3.389 ratio=4.793 reward=0.000
+  Ep 50 | target=(1.50,0.50) | init=0.707 final=2.028 ratio=2.868 reward=0.000
+  Ep 51 | target=(1.50,0.50) | init=0.707 final=3.097 ratio=4.380 reward=0.000
+  Ep 52 | target=(1.50,0.50) | init=0.707 final=2.803 ratio=3.964 reward=0.000
+  Ep 53 | target=(1.50,0.50) | init=0.707 final=3.181 ratio=4.499 reward=0.000
+  Ep 54 | target=(1.50,0.50) | init=0.707 final=2.389 ratio=3.378 reward=0.000
+  Ep 55 | target=(1.50,0.50) | init=0.707 final=3.240 ratio=4.583 reward=0.000
+  Ep 56 | target=(1.50,0.50) | init=0.707 final=3.021 ratio=4.272 reward=0.000
+  Ep 57 | target=(1.50,0.50) | init=0.707 final=1.897 ratio=2.683 reward=0.051
+  Ep 58 | target=(1.50,0.50) | init=0.707 final=1.563 ratio=2.210 reward=0.219
+  Ep 59 | target=(1.50,0.50) | init=0.707 final=2.920 ratio=4.129 reward=0.000
+  Ep 60 | target=(1.50,0.50) | init=0.707 final=1.564 ratio=2.212 reward=0.218
+  Ep 61 | target=(1.50,0.50) | init=0.707 final=3.216 ratio=4.548 reward=0.000
+  Ep 62 | target=(1.50,0.50) | init=0.707 final=3.324 ratio=4.701 reward=0.000
+  Ep 63 | target=(1.50,0.50) | init=0.707 final=3.282 ratio=4.641 reward=0.000
+  Ep 64 | target=(1.50,0.50) | init=0.707 final=3.103 ratio=4.389 reward=0.000
+  Ep 65 | target=(1.50,0.50) | init=0.707 final=1.897 ratio=2.683 reward=0.051
+  Ep 66 | target=(1.50,0.50) | init=0.707 final=1.785 ratio=2.525 reward=0.107
+  Ep 67 | target=(1.50,0.50) | init=0.707 final=1.730 ratio=2.446 reward=0.135
+  Ep 68 | target=(1.50,0.50) | init=0.707 final=2.545 ratio=3.599 reward=0.000
+  Ep 69 | target=(1.50,0.50) | init=0.707 final=3.476 ratio=4.915 reward=0.000
+  Ep 70 | target=(1.50,0.50) | init=0.707 final=3.235 ratio=4.576 reward=0.000
+  Ep 71 | target=(1.50,0.50) | init=0.707 final=3.323 ratio=4.700 reward=0.000
+  Ep 72 | target=(1.50,0.50) | init=0.707 final=3.411 ratio=4.824 reward=0.000
+  Ep 73 | target=(1.50,0.50) | init=0.707 final=3.172 ratio=4.486 reward=0.000
+  Ep 74 | target=(1.50,0.50) | init=0.707 final=2.006 ratio=2.837 reward=0.000
+  Ep 75 | target=(1.50,0.50) | init=0.707 final=2.653 ratio=3.752 reward=0.000
+  Ep 76 | target=(1.50,0.50) | init=0.707 final=1.561 ratio=2.207 reward=0.220
+  Ep 77 | target=(1.50,0.50) | init=0.707 final=1.777 ratio=2.513 reward=0.111
+  Ep 78 | target=(1.50,0.50) | init=0.707 final=1.561 ratio=2.207 reward=0.220
+  Ep 79 | target=(1.50,0.50) | init=0.707 final=1.833 ratio=2.593 reward=0.083
+  Ep 80 | target=(1.50,0.50) | init=0.707 final=1.561 ratio=2.207 reward=0.220
+  Ep 81 | target=(1.50,0.50) | init=0.707 final=3.194 ratio=4.516 reward=0.000
+  Ep 82 | target=(1.50,0.50) | init=0.707 final=1.999 ratio=2.826 reward=0.001
+  Ep 83 | target=(1.50,0.50) | init=0.707 final=2.955 ratio=4.180 reward=0.000
+  Ep 84 | target=(1.50,0.50) | init=0.707 final=1.561 ratio=2.207 reward=0.220
+  Ep 85 | target=(1.50,0.50) | init=0.707 final=3.165 ratio=4.475 reward=0.000
+  Ep 86 | target=(1.50,0.50) | init=0.707 final=1.561 ratio=2.207 reward=0.220
+  Ep 87 | target=(1.50,0.50) | init=0.707 final=2.358 ratio=3.334 reward=0.000
+  Ep 88 | target=(1.50,0.50) | init=0.707 final=3.409 ratio=4.821 reward=0.000
+  Ep 89 | target=(1.50,0.50) | init=0.707 final=3.426 ratio=4.845 reward=0.000
+  Ep 90 | target=(1.50,0.50) | init=0.707 final=2.534 ratio=3.584 reward=0.000
+  Ep 91 | target=(1.50,0.50) | init=0.707 final=2.865 ratio=4.052 reward=0.000
+  Ep 92 | target=(1.50,0.50) | init=0.707 final=3.531 ratio=4.993 reward=0.000
+  Ep 93 | target=(1.50,0.50) | init=0.707 final=3.054 ratio=4.319 reward=0.000
+  Ep 94 | target=(1.50,0.50) | init=0.707 final=3.256 ratio=4.605 reward=0.000
+  Ep 95 | target=(1.50,0.50) | init=0.707 final=1.563 ratio=2.210 reward=0.219
+  Ep 96 | target=(1.50,0.50) | init=0.707 final=1.853 ratio=2.620 reward=0.074
+  Ep 97 | target=(1.50,0.50) | init=0.707 final=1.561 ratio=2.207 reward=0.220
+  Ep 98 | target=(1.50,0.50) | init=0.707 final=1.707 ratio=2.415 reward=0.146
+  Ep 99 | target=(1.50,0.50) | init=0.707 final=1.889 ratio=2.671 reward=0.055
+
+=== FINAL RESULTS ===
+Ratio (final/initial distance):
+  Median: 2.8220
+  Mean:   3.3292
+  Min:    1.8054
+  Max:    5.0369
+  Target: ≤ 0.20
+
+=== PASS CHECK ===
+[FAIL] Median ratio 2.8220 > 0.20
