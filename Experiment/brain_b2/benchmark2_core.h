@@ -33,7 +33,7 @@
 #define WEIGHT_MIN          0.001
 #define WEIGHT_MAX          5.0
 #define MEMBRANE_REST       -65.0
-#define SPIKE_THRESHOLD     -50.0
+#define SPIKE_THRESHOLD     -55.0
 #define MEMBRANE_DECAY      0.95
 #define REFRACTORY_TICKS    3
 #define PSP_FACTOR          25.0
@@ -48,8 +48,10 @@
 #define ARM_DT              0.02    /* 物理模拟时间步长（减小防止飞远） */
 
 /* 群体编码参数 */
-#define ENCODE_SIGMA_POS    0.85    /* 位置编码高斯 sigma（覆盖网格间距） */
+#define ENCODE_SIGMA_POS    1.5
 #define DECODE_SIGMA_VEL    0.25    /* 速度解码高斯 sigma */
+#define ENCODE_SIGMA_PROP   0.6     /* 本体感觉角度编码 sigma (rad) */
+#define PROP_N              56      /* 12×θ1 + 12×θ2 + 16×ψ1 + 16×ψ2 (段位方位角特征) */
 
 /* ============================================================
  * 神经元类型
@@ -59,6 +61,7 @@ typedef enum {
     NT_HIDDEN     = 1,   /* 中间处理神经元 */
     NT_MOTOR_OMEGA1 = 2, /* 关节1角速度控制神经元 */
     NT_MOTOR_OMEGA2 = 3, /* 关节2角速度控制神经元 */
+    NT_INPUT_PROP = 4,   /* 本体感觉神经元（编码关节角度 θ1/θ2） */
 } NeuronType2;
 
 /* ============================================================
@@ -91,10 +94,12 @@ typedef struct {
 } Synapse2;
 
 /* ============================================================
- * 奖励事件队列
+ * 奖励事件队列（双通道：r1 给 MOTOR1 突触，r2 给 MOTOR2 突触）
  * ============================================================ */
 typedef struct {
-    double reward_scalar;
+    double reward_scalar;   /* 兼容字段 = (r1+r2)/2，用于 baseline */
+    double r1;              /* 关节1 专用奖励 */
+    double r2;              /* 关节2 专用奖励 */
     int delivery_tick;
 } RewardEvent2;
 
@@ -147,6 +152,8 @@ typedef struct {
     int queue_tail;
     
     int current_tick;
+    double decoded_omega1;    /* 当前 tick 解码的 omega1_cmd（供 reward 计算用） */
+    double decoded_omega2;    /* 当前 tick 解码的 omega2_cmd */
     
     HyperParams2 hp;
     ArmState arm;
@@ -178,13 +185,47 @@ void net2_set_target(NetworkState2* net, double tx, double ty);
 
 /* 奖励注入 */
 void net2_inject_reward(NetworkState2* net, double reward, int delay_ticks);
+/* 双通道奖励注入：r1→MOTOR1 突触，r2→MOTOR2 突触，其余突触用均值 */
+void net2_inject_reward2(NetworkState2* net, double r1, double r2, int delay_ticks);
 
 /* 物理步进（宿主可选手动控制） */
 void arm_step(ArmState* arm, double omega1_cmd, double omega2_cmd);
 void arm_set_target(ArmState* arm, double tx, double ty);
 double arm_reward(const ArmState* arm);
+void net2_reset_ema(void);
 
 /* 诊断 */
 void net2_dump_stats(NetworkState2* net, FILE* fp);
+
+/* ============================================================
+ * VIS 调试接口 —— 给可视化桌面用
+ * 所有 buffer 由调用者分配，C 侧只写
+ * ============================================================ */
+
+/* 拓扑快照（一次性）：
+ * out_neurons_buf: int[neuron_count * 4]
+ *   每个神经元: [type, pref_id, spike_flag(布局用), reserved]
+ * out_synapses_buf: int[synapse_count * 3] + double[synapse_count * 1]
+ *   每个突触: [pre_id, post_id] + [weight]
+ * 函数返回需要的大小（不够则返回负值要求调用者扩容）
+ */
+int net2_get_topology(NetworkState2* net,
+                      int* neuron_types, double* neuron_pref_x, double* neuron_pref_y, double* neuron_pref_omega,
+                      int* syn_pre, int* syn_post, double* syn_weight);
+
+/* 实时快照（每 tick）：
+ * out_neurons_buf: double[neuron_count * 3] → [membrane, is_spiking(0/1), last_spike_tick]
+ * out_arm_buf: double[10] → [theta1, theta2, omega1, omega2, end_x, end_y, target_x, target_y, reward, max_reach]
+ * out_meta_buf: int[3] → [current_tick, reward_queue_head, reward_queue_tail]
+ */
+void net2_get_snapshot(NetworkState2* net,
+                       double* neuron_membrane, double* neuron_spiking, double* neuron_last_spike,
+                       double* arm_state, int* meta);
+
+/* 写 topology JSON 文件（初始化后调用一次） */
+void net2_dump_topology_json(NetworkState2* net, const char* filepath);
+
+/* 写实时状态 JSON 文件（每 tick 调用，覆盖写） */
+void net2_dump_snapshot_json(NetworkState2* net, const char* filepath);
 
 #endif /* BENCHMARK2_CORE_H */
