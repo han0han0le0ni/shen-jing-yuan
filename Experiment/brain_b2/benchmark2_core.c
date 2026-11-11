@@ -1,4 +1,4 @@
-﻿/*
+﻿﻿/*
  * benchmark2_core.c - Benchmark-2 核心实现
  * 两关节虚拟臂到达
  *
@@ -26,6 +26,24 @@ static inline double clamp2(double v, double lo, double hi) {
     if (v < lo) return lo;
     if (v > hi) return hi;
     return v;
+}
+
+/* 突触数组容量保障：任何写入前调用，容量不足时 realloc 扩容。
+ * 返回 0 成功；-1 表示分配失败（调用者应清理并返回错误）。 */
+#define SYN_CAP_HARD_LIMIT 20000000
+static int ensure_synapse_capacity(NetworkState2* net, int needed) {
+    if (needed < 0 || needed > SYN_CAP_HARD_LIMIT) return -1;
+    if (needed <= net->synapse_capacity) return 0;
+    int newcap = net->synapse_capacity > 0 ? net->synapse_capacity : 1024;
+    while (newcap < needed) {
+        if (newcap > SYN_CAP_HARD_LIMIT / 2) { newcap = needed; break; }
+        newcap *= 2;
+    }
+    Synapse2* p = (Synapse2*)realloc(net->synapses, (size_t)newcap * sizeof(Synapse2));
+    if (!p) return -1;
+    net->synapses = p;
+    net->synapse_capacity = newcap;
+    return 0;
 }
 
 /* ============================================================
@@ -79,6 +97,9 @@ double arm_reward(const ArmState* arm) {
 int net2_init(NetworkState2* net, int input_n, int hidden_n,
               int motor1_n, int motor2_n, double avg_conn,
               unsigned int seed) {
+    /* 参数下界：避免 grid_side-1 / motor_n-1 的除零，以及空网络 */
+    if (!net || input_n < 2 || hidden_n < 1 || motor1_n < 2 || motor2_n < 2
+        || avg_conn < 1.0) return -1;
     memset(net, 0, sizeof(NetworkState2));
     g_rand = seed;
     
@@ -164,13 +185,18 @@ int net2_init(NetworkState2* net, int input_n, int hidden_n,
         net->neurons[idx].pref_omega = -0.5 + 1.0 * (double)i / (double)(motor2_n - 1);
     }
     
-    /* 突触分配：预估算（4 个连接层分别分配） */
+    /* 突触容量：按 6 个连接层循环次数求安全上界（去重只会更少），
+     * 并保留 ensure_synapse_capacity 作为兜底，任何估算偏差都不会越界。 */
     int K = (int)avg_conn;
     if (K < 3) K = 3;
-    /* 需要的总突触数 = input→hidden + hidden→hidden/2 + hidden→motor1 + hidden→motor2 */
-    int needed = net->input_count * K + hidden_n * (K / 2) + hidden_n * K + hidden_n * K;
-    int est = needed * 3 / 2;  /* 留 50% 余量 */
-    net->synapses = (Synapse2*)calloc(est, sizeof(Synapse2));
+    long long upper = (long long)net->input_count * 20
+                    + (long long)hidden_n * (K / 2)
+                    + (long long)hidden_n * K * 2
+                    + (long long)net->input_count * (motor1_n < 12 ? motor1_n : 12)
+                    + (long long)net->input_count * (motor2_n < 12 ? motor2_n : 12);
+    if (upper < 1 || upper > SYN_CAP_HARD_LIMIT) { free(net->neurons); return -1; }
+    net->synapse_capacity = (int)upper + 64;
+    net->synapses = (Synapse2*)calloc((size_t)net->synapse_capacity, sizeof(Synapse2));
     if (!net->synapses) { free(net->neurons); return -1; }
     
     net->synapse_count = 0;
@@ -190,10 +216,14 @@ int net2_init(NetworkState2* net, int input_n, int hidden_n,
             }
             if (dup) continue;
             
+            if (ensure_synapse_capacity(net, net->synapse_count + 1) != 0) {
+                net2_destroy(net);
+                return -1;
+            }
             s_idx = net->synapse_count++;
             net->synapses[s_idx].pre_id = pre;
             net->synapses[s_idx].post_id = post;
-            net->synapses[s_idx].weight = 1.0 + r_u() * 2.0;  /* 更大初始权重 1-3 */
+            net->synapses[s_idx].weight = 1.0 + r_u() * 2.0;  /* 1.0-3.0, mean 2.0 — handoff PASS 配置 */
             net->synapses[s_idx].eligibility_trace = 0.0;
             net->synapses[s_idx].last_stdp_tick = 0;
         }
@@ -212,6 +242,10 @@ int net2_init(NetworkState2* net, int input_n, int hidden_n,
             }
             if (dup) continue;
             
+            if (ensure_synapse_capacity(net, net->synapse_count + 1) != 0) {
+                net2_destroy(net);
+                return -1;
+            }
             s_idx = net->synapse_count++;
             net->synapses[s_idx].pre_id = pre;
             net->synapses[s_idx].post_id = post;
@@ -221,7 +255,7 @@ int net2_init(NetworkState2* net, int input_n, int hidden_n,
         }
     }
     
-    /* === 连接3: HIDDEN → MOTOR1 === */
+    /* === 连接3: HIDDEN → MOTOR1（减弱！让 I→M 主导初期） === */
     int motor1_base = net->input_count + hidden_n;
     for (i = 0; i < hidden_n; i++) {
         int pre = net->input_count + i;
@@ -235,10 +269,14 @@ int net2_init(NetworkState2* net, int input_n, int hidden_n,
             }
             if (dup) continue;
             
+            if (ensure_synapse_capacity(net, net->synapse_count + 1) != 0) {
+                net2_destroy(net);
+                return -1;
+            }
             s_idx = net->synapse_count++;
             net->synapses[s_idx].pre_id = pre;
             net->synapses[s_idx].post_id = post;
-            net->synapses[s_idx].weight = 0.3 + r_u() * 0.4;  /* 0.3-0.7（原 0.1-0.3） */
+            net->synapses[s_idx].weight = 0.3 + r_u() * 0.4;  /* 恢复 0.3-0.7 */
             net->synapses[s_idx].eligibility_trace = 0.0;
             net->synapses[s_idx].last_stdp_tick = 0;
         }
@@ -258,10 +296,14 @@ int net2_init(NetworkState2* net, int input_n, int hidden_n,
             }
             if (dup) continue;
             
+            if (ensure_synapse_capacity(net, net->synapse_count + 1) != 0) {
+                net2_destroy(net);
+                return -1;
+            }
             s_idx = net->synapse_count++;
             net->synapses[s_idx].pre_id = pre;
             net->synapses[s_idx].post_id = post;
-            net->synapses[s_idx].weight = 0.3 + r_u() * 0.4;  /* 0.3-0.7 */
+            net->synapses[s_idx].weight = 0.3 + r_u() * 0.4;  /* 恢复 0.3-0.7 */
             net->synapses[s_idx].eligibility_trace = 0.0;
             net->synapses[s_idx].last_stdp_tick = 0;
         }
@@ -279,10 +321,14 @@ int net2_init(NetworkState2* net, int input_n, int hidden_n,
                 if (net->synapses[s].pre_id == pre && net->synapses[s].post_id == post) { dup = 1; break; }
             }
             if (dup) continue;
+            if (ensure_synapse_capacity(net, net->synapse_count + 1) != 0) {
+                net2_destroy(net);
+                return -1;
+            }
             s_idx = net->synapse_count++;
             net->synapses[s_idx].pre_id = pre;
             net->synapses[s_idx].post_id = post;
-            net->synapses[s_idx].weight = 1.5 + r_u() * 1.0;  /* 1.5-2.5，更强直连 */
+            net->synapses[s_idx].weight = 1.5 + r_u() * 1.0;  /* 1.5-2.5, mean 2.0 — 恢复 */
             net->synapses[s_idx].eligibility_trace = 0.0;
             net->synapses[s_idx].last_stdp_tick = 0;
         }
@@ -299,10 +345,14 @@ int net2_init(NetworkState2* net, int input_n, int hidden_n,
                 if (net->synapses[s].pre_id == pre && net->synapses[s].post_id == post) { dup = 1; break; }
             }
             if (dup) continue;
+            if (ensure_synapse_capacity(net, net->synapse_count + 1) != 0) {
+                net2_destroy(net);
+                return -1;
+            }
             s_idx = net->synapse_count++;
             net->synapses[s_idx].pre_id = pre;
             net->synapses[s_idx].post_id = post;
-            net->synapses[s_idx].weight = 1.5 + r_u() * 1.0;  /* 1.5-2.5 */
+            net->synapses[s_idx].weight = 1.5 + r_u() * 1.0;  /* 1.5-2.5, mean 2.0 */
             net->synapses[s_idx].eligibility_trace = 0.0;
             net->synapses[s_idx].last_stdp_tick = 0;
         }
@@ -310,13 +360,19 @@ int net2_init(NetworkState2* net, int input_n, int hidden_n,
     
     /* 超参数：防止 trace 瞬间饱和 */
     net->hp.tau_stdp = 50.0;
-    net->hp.tau_trace = 500.0;          /* 从 2000 → 500，让 trace 更快衰减 */
+    net->hp.tau_trace = 2000.0;          /* 2000 最佳 */
     net->hp.lambda_trace = exp(-1.0 / net->hp.tau_trace);
-    net->hp.stdp_a_plus = 0.05;         /* 从 0.1 → 0.05，每次 STDP 事件给 trace 更小增量 */
-    net->hp.stdp_a_minus = 0.06;        /* 从 0.12 → 0.06，保持 a_minus/a_plus = 1.2 */
+    net->hp.stdp_a_plus = 0.05;         /* 旧版最佳 0.05：配合 trace clamp [-1,1]，trace 快速饱和到 1 */
+    net->hp.stdp_a_minus = 0.06;        /* 保持 1.2:1 比例 */
     net->hp.learning_rate = 0.15;       /* 恢复 0.15 */
     net->hp.weight_decay_lambda = 1e-5;
-    net->hp.reward_baseline_window = 50;  /* 恢复 50 */
+    net->hp.reward_baseline_window = 200;  /* 200 最佳，500 太慢 */
+    /* 运行时可调参数：默认值 = 旧版硬编码值 */
+    net->hp.psp_factor = 25.0;
+    net->hp.trace_clamp = 1.0;
+    net->hp.decode_mode = 0;
+    net->hp.wta_k = 3;
+    net->hp.use_reward_baseline = 1;
     
     #if ELIGIBILITY_TRACE_ENABLE
     net->use_eligibility_trace = 1;
@@ -331,6 +387,7 @@ int net2_init(NetworkState2* net, int input_n, int hidden_n,
     
     net->reward_baseline = 0.0;
     net->reward_history = (double*)calloc(net->hp.reward_baseline_window, sizeof(double));
+    if (!net->reward_history) { net2_destroy(net); return -1; }
     
     /* 关节臂初始状态 */
     net->arm.theta1 = 0.0;
@@ -349,10 +406,19 @@ int net2_init(NetworkState2* net, int input_n, int hidden_n,
 }
 
 void net2_destroy(NetworkState2* net) {
+    if (!net) return;
     if (net->neurons) free(net->neurons);
     if (net->synapses) free(net->synapses);
     if (net->reward_history) free(net->reward_history);
     memset(net, 0, sizeof(NetworkState2));
+}
+
+int net2_neuron_count(const NetworkState2* net) {
+    return net ? net->neuron_count : 0;
+}
+
+int net2_synapse_count(const NetworkState2* net) {
+    return net ? net->synapse_count : 0;
 }
 
 /* ============================================================
@@ -396,6 +462,58 @@ static double stdp_kernel2(NetworkState2* net, double dt) {
  * Tick 核心
  * ============================================================ */
 void net2_tick(NetworkState2* net) {
+    /* ═══════════════════════════════════════════════════════
+     * REWARD QUEUE：tick **开头** 处理上一 tick host 注入的 reward
+     * 关键时序对齐：
+     *   tick N 的 spike → omega → arm_step → dist 变化 → host 注入 reward N
+     *   reward N 在下一 tick (N+1) 的**开头**被处理
+     *   此时 trace 已包含 tick N 的 spike（tick N 的 Step 3 做过了）
+     *   → reward N credit 给 tick N 的 spike ✓！
+     * 之前放在 Step 6（结尾）导致 reward N credit 给了 tick N+1 的 spike（差 1 tick！）
+     * ═══════════════════════════════════════════════════════ */
+    while (net->queue_head != net->queue_tail &&
+           net->reward_queue[net->queue_head].delivery_tick <= net->current_tick) {
+        RewardEvent2 ev = net->reward_queue[net->queue_head];
+        net->queue_head = (net->queue_head + 1) % QUEUE_SIZE;
+        
+        /* 默认减滑动基线；新模式可关闭，让缓慢变化的势能奖励保留长期梯度 */
+        double base = net->hp.use_reward_baseline ? net->reward_baseline : 0.0;
+        double err = ev.reward_scalar - base;
+        double err1 = ev.r1 - base;
+        double err2 = ev.r2 - base;
+        
+        #if REWARD_MODULATION_ENABLE
+        if (net->use_reward_modulation && fabs(err) > 0.001) {
+            for (int s = 0; s < net->synapse_count; s++) {
+                Synapse2* syn = &net->synapses[s];
+                #if ELIGIBILITY_TRACE_ENABLE
+                double credit = net->use_eligibility_trace ? syn->eligibility_trace : 0.0;
+                #else
+                double credit = 0.0;
+                #endif
+                if (fabs(credit) > 1e-8) {
+                    NeuronType2 pt = net->neurons[syn->post_id].type;
+                    double e = (pt == NT_MOTOR_OMEGA1) ? err1
+                             : (pt == NT_MOTOR_OMEGA2) ? err2 : err;
+                    
+                    double dw = net->hp.learning_rate * e * credit;
+                    syn->weight = clamp2(syn->weight + dw, WEIGHT_MIN, WEIGHT_MAX);
+                }
+            }
+        }
+        #endif
+        
+        /* 更新基线（sliding window=200）—— v2 已经证明这是正确配置
+         * EMA alpha=0.005 太慢导致 baseline 和 reward 脱节 → 权重不涨反跌 */
+        net->reward_history[net->reward_hist_head] = ev.reward_scalar;
+        net->reward_hist_head = (net->reward_hist_head + 1) % net->hp.reward_baseline_window;
+        if (net->reward_hist_count < net->hp.reward_baseline_window) net->reward_hist_count++;
+        
+        double sum = 0.0;
+        for (int k = 0; k < net->reward_hist_count; k++) sum += net->reward_history[k];
+        net->reward_baseline = sum / net->reward_hist_count;
+    }
+
     net->current_tick++;
     int s, i;
     
@@ -449,7 +567,7 @@ void net2_tick(NetworkState2* net) {
         Neuron2* pre = &net->neurons[net->synapses[s].pre_id];
         Neuron2* post = &net->neurons[net->synapses[s].post_id];
         if (pre->is_spiking) {
-            post->membrane_potential += net->synapses[s].weight * PSP_FACTOR;
+            post->membrane_potential += net->synapses[s].weight * net->hp.psp_factor;
         }
     }
     
@@ -491,9 +609,12 @@ void net2_tick(NetworkState2* net) {
      * K 小 → 方向更明确（正负池不会数量相当抵消），学习更快
      * 正确算法：遍历找膜电位最高的 K 个（不断替换最小的 winner）*/
     {
+        enum { WTA_MAX = 64 };
         int m1_base = net->input_count + net->hidden_count;
         int m2_base = m1_base + net->motor1_count;
-        int WTA_K = 3;  /* K=3 是之前验证最好的 */
+        int WTA_K = net->hp.wta_k;  /* 运行时可配，默认 3 */
+        if (WTA_K < 1) WTA_K = 1;
+        if (WTA_K > WTA_MAX) WTA_K = WTA_MAX;
         
         for (int m_layer = 0; m_layer < 2; m_layer++) {
             int base = (m_layer == 0) ? m1_base : m2_base;
@@ -501,7 +622,7 @@ void net2_tick(NetworkState2* net) {
             
             /* 正确的 k-winner 算法：
              * 维护 K 个 winner，每次找到最小的 winner，若当前神经元更大则替换 */
-            int winners[64];
+            int winners[WTA_MAX];
             for (int w = 0; w < WTA_K; w++) winners[w] = -1;
             
             for (int j = 0; j < count; j++) {
@@ -527,6 +648,22 @@ void net2_tick(NetworkState2* net) {
                 if (winners[w] >= 0) {
                     net->neurons[base + winners[w]].is_spiking = 1;
                 }
+            }
+            
+            /* 加权解码：膜电位尚未被 winner 重置，按相对阈值强度加权 pref_omega */
+            if (net->hp.decode_mode == 2) {
+                double wsum = 0.0, wtot = 0.0;
+                for (int w = 0; w < WTA_K; w++) {
+                    if (winners[w] < 0) continue;
+                    Neuron2* wn = &net->neurons[base + winners[w]];
+                    double v = wn->membrane_potential - MEMBRANE_REST;
+                    if (v < 1e-6) v = 1e-6;
+                    wsum += v * wn->pref_omega;
+                    wtot += v;
+                }
+                double cmd = (wtot > 0.0) ? wsum / wtot : 0.0;
+                if (m_layer == 0) net->decoded_omega1 = cmd;
+                else              net->decoded_omega2 = cmd;
             }
         }
     }
@@ -559,18 +696,30 @@ void net2_tick(NetworkState2* net) {
         if (net->use_eligibility_trace) {
             double stdp_val = 0.0;
             /* STDP：pre→post 时间差 → LTP，post→pre 时间差 → LTD
-             * 两个分支分别覆盖 pre 先 spike 和 post 先 spike 的情况 */
-            if (pre->is_spiking && post->last_spike_tick > 0) {
-                /* pre 在 post 后 spike → dt = pre_tick - post_tick > 0 → pre→post 时间差 < 0 → LTD */
+             * 关键修复：I→M 突触跳过分支1（pre-then-post LTD）！
+             * 原因：INPUT 每 tick 都 spike（持续编码），MOTOR 也常 spike
+             * 两个分支同时触发，a_minus(0.06)>a_plus(0.05) → net LTD
+             * → R-STDP 的 err*trace 被反转！学习停滞！
+             * 对于 I→M 突触，只保留分支2（post spike, pre 已 spike → LTP）
+             * H→H 和 H→M 突触保持完整 STDP */
+            int is_I_to_M = (pre->type == NT_INPUT_X || pre->type == NT_INPUT_PROP) &&
+                            (post->type == NT_MOTOR_OMEGA1 || post->type == NT_MOTOR_OMEGA2);
+            
+            if (!is_I_to_M && pre->is_spiking && post->last_spike_tick > 0) {
+                /* 分支1: pre 在 post 后 spike → LTD（只对非 I→M 生效） */
                 stdp_val += stdp_kernel2(net, -(double)(net->current_tick - post->last_spike_tick));
             }
             if (post->is_spiking && pre->last_spike_tick > 0) {
-                /* pre 在 post 前 spike → dt = pre_tick - post_tick < 0 → pre→post 时间差 > 0 → LTP */
+                /* 分支2: pre 在 post 前 spike → LTP（对所有突触生效） */
                 stdp_val += stdp_kernel2(net, (double)(net->current_tick - pre->last_spike_tick));
             }
             net->synapses[s].eligibility_trace += stdp_val;
-            if (net->synapses[s].eligibility_trace > 1.0)  net->synapses[s].eligibility_trace = 1.0;
-            if (net->synapses[s].eligibility_trace < -1.0) net->synapses[s].eligibility_trace = -1.0;
+            /* 截断幅度运行时可配：默认 1.0（旧版行为），<=0 表示不截断 */
+            double tc = net->hp.trace_clamp;
+            if (tc > 0.0) {
+                if (net->synapses[s].eligibility_trace >  tc) net->synapses[s].eligibility_trace =  tc;
+                if (net->synapses[s].eligibility_trace < -tc) net->synapses[s].eligibility_trace = -tc;
+            }
         } else {
             net->synapses[s].eligibility_trace = 0.0;
         }
@@ -579,11 +728,14 @@ void net2_tick(NetworkState2* net) {
         #endif
     }
     
-    /* Step 4: SNN 解码 → 直接看 is_spiking（WTA winner）+ **直接平均所有 winner**！
-     * 之前用方向池分离平均：2正1负→只取正的平均（丢掉负信息），太粗！
-     * 现在直接平均所有 winner pref_omega → 2正1负(+0.5,+0.7,-0.1) → 平均+0.37，精细连续值！*/
+    /* Step 4: SNN 解码 → 直接平均所有 spike winner 的 pref_omega
+     * STDP 是 spike-based，解码也用 spike-based 方式，信号匹配 */
     double omega1_cmd = 0.0, omega2_cmd = 0.0;
-    {
+    if (net->hp.decode_mode == 2) {
+        /* 加权解码结果在 WTA 阶段算好（膜电位那时还未被重置） */
+        omega1_cmd = net->decoded_omega1;
+        omega2_cmd = net->decoded_omega2;
+    } else {
         int m1_base = net->input_count + net->hidden_count;
         int m2_base = m1_base + net->motor1_count;
         
@@ -591,7 +743,6 @@ void net2_tick(NetworkState2* net) {
             int m_base = (j == 0) ? m1_base : m2_base;
             int m_count = (j == 0) ? net->motor1_count : net->motor2_count;
             
-            /* 直接平均所有 spike winner 的 pref_omega → 精细连续值！*/
             int w_count = 0; double w_sum = 0.0;
             for (int i = 0; i < m_count; i++) {
                 Neuron2* n = &net->neurons[m_base + i];
@@ -605,9 +756,9 @@ void net2_tick(NetworkState2* net) {
         }
     }
     
-    /* 解码后加小探索噪声：让 arm 轻微试探不同方向，不会淹没 WTA 信号 */
-    omega1_cmd += r_gauss(0.0, 0.05);
-    omega2_cmd += r_gauss(0.0, 0.05);
+    /* 解码后加小探索噪声 σ=0.02：最优值 */
+    omega1_cmd += r_gauss(0.0, 0.02);
+    omega2_cmd += r_gauss(0.0, 0.02);
     omega1_cmd = fmax(-0.5, fmin(0.5, omega1_cmd));
     omega2_cmd = fmax(-0.5, fmin(0.5, omega2_cmd));
     
@@ -617,47 +768,7 @@ void net2_tick(NetworkState2* net) {
     /* Step 5: 物理模拟一步 */
     arm_step(&net->arm, omega1_cmd, omega2_cmd);
     
-    /* Step 6: 处理 reward queue */
-    while (net->queue_head != net->queue_tail &&
-           net->reward_queue[net->queue_head].delivery_tick <= net->current_tick) {
-        RewardEvent2 ev = net->reward_queue[net->queue_head];
-        net->queue_head = (net->queue_head + 1) % QUEUE_SIZE;
-        
-        double err = ev.reward_scalar - net->reward_baseline;
-        double err1 = ev.r1 - net->reward_baseline;   /* 关节1 专用 err */
-        double err2 = ev.r2 - net->reward_baseline;   /* 关节2 专用 err */
-        
-        #if REWARD_MODULATION_ENABLE
-        if (net->use_reward_modulation && fabs(err) > 0.001) {
-            for (s = 0; s < net->synapse_count; s++) {
-                Synapse2* syn = &net->synapses[s];
-                #if ELIGIBILITY_TRACE_ENABLE
-                double credit = net->use_eligibility_trace ? syn->eligibility_trace : 0.0;
-                #else
-                double credit = 0.0;
-                #endif
-                if (fabs(credit) > 1e-8) {
-                    /* 分关节 credit：post 是 MOTOR1 用 err1，MOTOR2 用 err2，其余用全局 err
-                     * ω1 好 ω2 差时不再互相连坐，credit 精度翻倍 */
-                    NeuronType2 pt = net->neurons[syn->post_id].type;
-                    double e = (pt == NT_MOTOR_OMEGA1) ? err1
-                             : (pt == NT_MOTOR_OMEGA2) ? err2 : err;
-                    double dw = net->hp.learning_rate * e * credit;
-                    syn->weight = clamp2(syn->weight + dw, WEIGHT_MIN, WEIGHT_MAX);
-                }
-            }
-        }
-        #endif
-        
-        /* 更新基线 */
-        net->reward_history[net->reward_hist_head] = ev.reward_scalar;
-        net->reward_hist_head = (net->reward_hist_head + 1) % net->hp.reward_baseline_window;
-        if (net->reward_hist_count < net->hp.reward_baseline_window) net->reward_hist_count++;
-        
-        double sum = 0.0;
-        for (int k = 0; k < net->reward_hist_count; k++) sum += net->reward_history[k];
-        net->reward_baseline = sum / net->reward_hist_count;
-    }
+    /* reward queue 已移到 tick 开头处理（修正了 1 tick 的时序错位） */
 }
 
 void net2_inject_reward2(NetworkState2* net, double r1, double r2, int delay_ticks) {
@@ -678,6 +789,7 @@ void net2_inject_reward(NetworkState2* net, double reward, int delay_ticks) {
  * 诊断
  * ============================================================ */
 void net2_dump_stats(NetworkState2* net, FILE* fp) {
+    if (!net || !fp) return;
     double w_sum = 0, w_min = 1e9, w_max = -1e9;
     int s;
     for (s = 0; s < net->synapse_count; s++) {
@@ -688,7 +800,10 @@ void net2_dump_stats(NetworkState2* net, FILE* fp) {
     fprintf(fp, "Neurons: in=%d h=%d m1=%d m2=%d total=%d\n",
             net->input_count, net->hidden_count, net->motor1_count, net->motor2_count, net->neuron_count);
     fprintf(fp, "Synapses: %d, w_mean=%.4f min=%.4f max=%.4f\n",
-            net->synapse_count, w_sum / net->synapse_count, w_min, w_max);
+            net->synapse_count,
+            net->synapse_count > 0 ? w_sum / net->synapse_count : 0.0,
+            net->synapse_count > 0 ? w_min : 0.0,
+            net->synapse_count > 0 ? w_max : 0.0);
     fprintf(fp, "Arm: theta1=%.3f theta2=%.3f endpoint=(%.3f,%.3f) target=(%.3f,%.3f) reward=%.3f\n",
             net->arm.theta1, net->arm.theta2, net->arm.end_x, net->arm.end_y,
             net->arm.target_x, net->arm.target_y, net->arm.reward);
@@ -755,6 +870,141 @@ void net2_get_snapshot(NetworkState2* net,
     meta[0] = net->current_tick;
     meta[1] = net->queue_head;
     meta[2] = net->queue_tail;
+}
+
+/* ============================================================
+ * 运行时参数设置 / 轮次控制（供宿主与 Python 可视化调用）
+ * ============================================================ */
+static int b2_param_is(const char* a, const char* b) {
+    return strcmp(a, b) == 0;
+}
+
+int net2_set_param(NetworkState2* net, const char* name, double value) {
+    HyperParams2* hp;
+    if (!net || !name) return -1;
+    hp = &net->hp;
+
+    if (b2_param_is(name, "learning_rate")) {
+        if (value < 0.0 || value > 10.0) return -1;
+        hp->learning_rate = value;
+    } else if (b2_param_is(name, "tau_stdp")) {
+        if (value < 1.0) return -1;
+        hp->tau_stdp = value;
+    } else if (b2_param_is(name, "tau_trace")) {
+        if (value < 1.0) return -1;
+        hp->tau_trace = value;
+        hp->lambda_trace = exp(-1.0 / value);   /* 派生量必须同步 */
+    } else if (b2_param_is(name, "stdp_a_plus")) {
+        if (value < 0.0) return -1;
+        hp->stdp_a_plus = value;
+    } else if (b2_param_is(name, "stdp_a_minus")) {
+        if (value < 0.0) return -1;
+        hp->stdp_a_minus = value;
+    } else if (b2_param_is(name, "weight_decay_lambda")) {
+        if (value < 0.0) return -1;
+        hp->weight_decay_lambda = value;
+    } else if (b2_param_is(name, "psp_factor")) {
+        if (value <= 0.0) return -1;
+        hp->psp_factor = value;
+    } else if (b2_param_is(name, "trace_clamp")) {
+        if (value < 0.0) return -1;
+        hp->trace_clamp = value;
+    } else if (b2_param_is(name, "decode_mode")) {
+        if (value != 0.0 && value != 2.0) return -1;
+        hp->decode_mode = (int)value;
+    } else if (b2_param_is(name, "wta_k")) {
+        if (value < 1.0 || value > 64.0) return -1;
+        hp->wta_k = (int)value;
+    } else if (b2_param_is(name, "use_reward_baseline")) {
+        hp->use_reward_baseline = value >= 0.5 ? 1 : 0;
+    } else if (b2_param_is(name, "el_trace")) {
+        net->use_eligibility_trace = value >= 0.5 ? 1 : 0;
+    } else if (b2_param_is(name, "reward_mod")) {
+        net->use_reward_modulation = value >= 0.5 ? 1 : 0;
+    } else if (b2_param_is(name, "reward_baseline_window")) {
+        int w = (int)value;
+        double* nh;
+        if (w < 1 || w > 100000) return -1;
+        nh = (double*)calloc((size_t)w, sizeof(double));
+        if (!nh) return -1;
+        free(net->reward_history);
+        net->reward_history = nh;
+        hp->reward_baseline_window = w;
+        net->reward_baseline = 0.0;
+        net->reward_hist_head = 0;
+        net->reward_hist_count = 0;
+    } else {
+        return -1;
+    }
+    return 0;
+}
+
+double net2_get_param(const NetworkState2* net, const char* name) {
+    const HyperParams2* hp;
+    if (!net || !name) return NAN;
+    hp = &net->hp;
+#define B2_GET(n, f) if (b2_param_is(name, n)) return (double)(f)
+    B2_GET("learning_rate", hp->learning_rate);
+    B2_GET("tau_stdp", hp->tau_stdp);
+    B2_GET("tau_trace", hp->tau_trace);
+    B2_GET("lambda_trace", hp->lambda_trace);
+    B2_GET("stdp_a_plus", hp->stdp_a_plus);
+    B2_GET("stdp_a_minus", hp->stdp_a_minus);
+    B2_GET("weight_decay_lambda", hp->weight_decay_lambda);
+    B2_GET("reward_baseline_window", hp->reward_baseline_window);
+    B2_GET("psp_factor", hp->psp_factor);
+    B2_GET("trace_clamp", hp->trace_clamp);
+    B2_GET("decode_mode", hp->decode_mode);
+    B2_GET("wta_k", hp->wta_k);
+    B2_GET("use_reward_baseline", hp->use_reward_baseline);
+    B2_GET("el_trace", net->use_eligibility_trace);
+    B2_GET("reward_mod", net->use_reward_modulation);
+    B2_GET("reward_baseline", net->reward_baseline);
+    B2_GET("current_tick", net->current_tick);
+#undef B2_GET
+    return NAN;
+}
+
+void net2_episode_reset(NetworkState2* net, double tx, double ty) {
+    int i;
+    if (!net) return;
+    /* 关节与末端归位；资格迹、奖励基线、权重全部保留，学习成果不丢 */
+    net->arm.theta1 = 0.0;
+    net->arm.theta2 = 0.0;
+    net->arm.omega1 = 0.0;
+    net->arm.omega2 = 0.0;
+    net->arm.end_x = ARM_L1 + ARM_L2;
+    net->arm.end_y = 0.0;
+    net->arm.max_reach = ARM_L1 + ARM_L2;
+    net->arm.reward = 1.0;
+    net->decoded_omega1 = 0.0;
+    net->decoded_omega2 = 0.0;
+    net2_reset_ema();
+    net2_set_target(net, tx, ty);
+    for (i = 0; i < net->neuron_count; i++) {
+        Neuron2* n = &net->neurons[i];
+        if (n->type == NT_INPUT_X) continue;   /* 输入层保留目标编码 */
+        n->membrane_potential = MEMBRANE_REST;
+        n->is_spiking = 0;
+        n->refractory_remaining = 0;
+        n->last_spike_tick = -1;
+    }
+    net->queue_head = 0;
+    net->queue_tail = 0;
+}
+
+void net2_get_arm(const NetworkState2* net, double* a) {
+    if (!net || !a) return;
+    a[0] = net->arm.theta1;
+    a[1] = net->arm.theta2;
+    a[2] = net->arm.omega1;
+    a[3] = net->arm.omega2;
+    a[4] = net->arm.end_x;
+    a[5] = net->arm.end_y;
+    a[6] = net->arm.target_x;
+    a[7] = net->arm.target_y;
+    a[8] = net->arm.reward;
+    a[9] = net->arm.max_reach;
 }
 
 /* JSON 拓扑（一次性，初始化后调用） */

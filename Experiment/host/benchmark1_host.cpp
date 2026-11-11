@@ -61,7 +61,7 @@ void print_usage(const char* prog) {
 
 int main(int argc, char* argv[]) {
     BenchmarkConfig cfg;
-    std::string out_file = "E:/shen_jing_yuan/Experiment/data/benchmark1_results.csv";
+    std::string out_file = "data/benchmark1_results.csv";  /* 相对 Experiment 目录 */
     bool force_no_trace = false;
     bool force_no_reward = false;
     
@@ -74,7 +74,6 @@ int main(int argc, char* argv[]) {
         }
         auto next = [&](int& val) { if (i+1 < argc) val = atoi(argv[++i]); };
         auto nextu = [&](unsigned int& val) { if (i+1 < argc) val = (unsigned int)strtoul(argv[++i], nullptr, 10); };
-        auto nextd = [&](double& val) { if (i+1 < argc) val = atof(argv[++i]); };
         
         if (arg == "--sensory_a") next(cfg.sensory_a);
         else if (arg == "--sensory_b") next(cfg.sensory_b);
@@ -87,6 +86,12 @@ int main(int argc, char* argv[]) {
         else if (arg == "--out") { if (i+1 < argc) out_file = argv[++i]; }
         else if (arg == "--disable_trace") force_no_trace = true;
         else if (arg == "--disable_reward") force_no_reward = true;
+    }
+    
+    if (cfg.trials < 2 || cfg.delay_ticks < 0 || cfg.sensory_a < 1 ||
+        cfg.sensory_b < 1 || cfg.hidden < 1 || cfg.output_a < 1 || cfg.output_b < 1) {
+        fprintf(stderr, "Invalid config: trials >= 2, delay >= 0, layer sizes >= 1\n");
+        return 1;
     }
     
     printf("=== Benchmark-1: Single-Synapse Delayed Credit Assignment ===\n");
@@ -122,6 +127,29 @@ int main(int argc, char* argv[]) {
     /* 写CSV头 */
     fprintf(fp, "trial,stimulus_type,predicted_vote,correct,output_a_rate,output_b_rate,"
                 "reward_given,reward_baseline,elapsed_ticks\n");
+    
+    /* 元数据 sidecar：与 B2 一致，记录超参与构建信息 */
+    std::string meta_path = out_file + ".meta.json";
+    FILE* mf = fopen(meta_path.c_str(), "w");
+    if (mf) {
+        std::string out_j = out_file;
+        for (char& ch : out_j) if (ch == '\\') ch = '/';
+        fprintf(mf, "{\n");
+        fprintf(mf, "  \"benchmark\": 1,\n");
+        fprintf(mf, "  \"build\": \"%s %s\",\n", __DATE__, __TIME__);
+        fprintf(mf, "  \"out_csv\": \"%s\",\n", out_j.c_str());
+        fprintf(mf, "  \"sensory_a\": %d, \"sensory_b\": %d, \"hidden\": %d,\n",
+                cfg.sensory_a, cfg.sensory_b, cfg.hidden);
+        fprintf(mf, "  \"output_a\": %d, \"output_b\": %d, \"avg_conn\": %.4f,\n",
+                cfg.output_a, cfg.output_b, cfg.avg_conn);
+        fprintf(mf, "  \"trials\": %d, \"delay_ticks\": %d, \"seed\": %u,\n",
+                cfg.trials, cfg.delay_ticks, cfg.seed);
+        fprintf(mf, "  \"el_trace\": %d, \"reward_mod\": %d,\n",
+                net.use_eligibility_trace, net.use_reward_modulation);
+        fprintf(mf, "  \"neurons\": %d, \"synapses\": %d\n", net.neuron_count, net.synapse_count);
+        fprintf(mf, "}\n");
+        fclose(mf);
+    }
     
     /* 试次统计 */
     int correct_count = 0;
@@ -253,7 +281,7 @@ int main(int argc, char* argv[]) {
     printf("Output file:       %s\n", out_file.c_str());
     
     /* 诊断信息 */
-    FILE* diag = fopen("E:/shen_jing_yuan/Experiment/logs/benchmark1_diagnostic.txt", "w");
+    FILE* diag = fopen("logs/benchmark1_diagnostic.txt", "w");  /* 相对 Experiment 目录 */
     if (diag) {
         fprintf(diag, "=== Benchmark-1 Diagnostic Log ===\n");
         fprintf(diag, "Timestamp: %s\n", __DATE__ " " __TIME__);

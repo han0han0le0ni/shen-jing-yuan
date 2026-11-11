@@ -12,6 +12,14 @@ Experiment/data_b2/mini*.csv
 # 调试临时文件
 debug_*.exe
 debug_*.o
+debug_*.c
+Experiment/debug_*.c
+Experiment/debug_*.o
+Experiment/debug_*.exe
+Experiment/debug_direction.*
+Experiment/audit/full_report.html
+Experiment/audit/inspect.txt
+Experiment/audit/验收.md
 
 # IDE
 .vscode/

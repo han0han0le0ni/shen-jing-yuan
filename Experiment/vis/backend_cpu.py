@@ -1,5 +1,5 @@
 """CPU 后端 —— 零文件 IO，ctypes 直接 flat buffer"""
-import ctypes, os, json
+import ctypes
 
 LAYER_INPUT_X = 0
 LAYER_HIDDEN  = 1
@@ -37,6 +37,11 @@ class CPUBackend:
                                 ctypes.c_uint]
         L.net2_init.restype = ctypes.c_int
         L.net2_destroy.argtypes = [ctypes.c_void_p]
+        # 真实规模必须由 C 侧提供，不能按 Python 端层数相加估算
+        L.net2_neuron_count.argtypes = [ctypes.c_void_p]
+        L.net2_neuron_count.restype = ctypes.c_int
+        L.net2_synapse_count.argtypes = [ctypes.c_void_p]
+        L.net2_synapse_count.restype = ctypes.c_int
         L.net2_tick.argtypes = [ctypes.c_void_p]
         L.net2_set_target.argtypes = [ctypes.c_void_p, ctypes.c_double, ctypes.c_double]
         L.net2_get_topology.argtypes = [
@@ -59,15 +64,41 @@ class CPUBackend:
         ]
         L.net2_dump_topology_json.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
         L.net2_dump_snapshot_json.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
+        # 训练接口：旧版 DLL 可能没有这些导出，逐个探测而不是直接崩在加载阶段
+        train_sigs = (
+            ("net2_inject_reward",  [ctypes.c_void_p, ctypes.c_double, ctypes.c_int], None),
+            ("net2_inject_reward2", [ctypes.c_void_p, ctypes.c_double,
+                                     ctypes.c_double, ctypes.c_int], None),
+            ("net2_reset_ema",      [], None),
+            ("net2_set_param",      [ctypes.c_void_p, ctypes.c_char_p,
+                                     ctypes.c_double], ctypes.c_int),
+            ("net2_get_param",      [ctypes.c_void_p, ctypes.c_char_p], ctypes.c_double),
+            ("net2_episode_reset",  [ctypes.c_void_p, ctypes.c_double,
+                                     ctypes.c_double], None),
+            ("net2_get_arm",        [ctypes.c_void_p,
+                                     ctypes.POINTER(ctypes.c_double)], None),
+        )
+        self.can_train = True
+        for name, argtypes, restype in train_sigs:
+            if not hasattr(L, name):
+                self.can_train = False
+                continue
+            fn = getattr(L, name)
+            fn.argtypes = argtypes
+            if restype is not None:
+                fn.restype = restype
 
     def init(self, input_n, hidden_n, motor1_n, motor2_n, seed=42, avg_conn=8.0):
         rc = self.lib.net2_init(self.net_ptr, input_n, hidden_n, motor1_n,
                                 motor2_n, float(avg_conn), int(seed))
         if rc != 0: raise RuntimeError(f"net2_init rc={rc}")
+        neuron_count = int(self.lib.net2_neuron_count(self.net_ptr))
+        if neuron_count <= 0:
+            raise RuntimeError("net2_neuron_count() returned an invalid value")
         self.config = {
             "input": input_n, "hidden": hidden_n,
             "motor1": motor1_n, "motor2": motor2_n,
-            "neuron_count": input_n + hidden_n + motor1_n + motor2_n,
+            "neuron_count": neuron_count,  # 真实值：含 PROP_N 个本体感觉神经元
         }
         self._alloc_buffers()
         self._topo = None   # 重新初始化后必须让拓扑缓存失效
@@ -88,15 +119,39 @@ class CPUBackend:
     def set_target(self, x, y):
         self.lib.net2_set_target(self.net_ptr, float(x), float(y))
 
+    # ---------- 训练 / 调参 ----------
+    def get_arm(self):
+        """逐 tick 轻量读取 (end_x, end_y, target_x, target_y, max_reach)"""
+        self.lib.net2_get_arm(self.net_ptr, self._arm)
+        return (float(self._arm[4]), float(self._arm[5]),
+                float(self._arm[6]), float(self._arm[7]), float(self._arm[9]))
+
+    def inject_reward(self, r, delay=0):
+        self.lib.net2_inject_reward(self.net_ptr, float(r), int(delay))
+
+    def inject_reward2(self, r1, r2, delay=0):
+        self.lib.net2_inject_reward2(self.net_ptr, float(r1), float(r2), int(delay))
+
+    def set_param(self, name, value):
+        return int(self.lib.net2_set_param(self.net_ptr, name.encode("utf-8"),
+                                           float(value)))
+
+    def get_param(self, name):
+        return float(self.lib.net2_get_param(self.net_ptr, name.encode("utf-8")))
+
+    def episode_reset(self, tx, ty):
+        self.lib.net2_episode_reset(self.net_ptr, float(tx), float(ty))
+
+    def reset_ema(self):
+        self.lib.net2_reset_ema()
+
     def get_topology(self):
         if self._topo: return self._topo
-        # 先用 JSON 拿 synapse_count（C 端没直接返回）
-        tmp = os.path.join(os.environ.get("TEMP", "."), "_topo.json")
-        self.lib.net2_dump_topology_json(self.net_ptr, tmp.encode())
-        with open(tmp) as f: j = json.load(f)
-        os.remove(tmp)
-        nc = j["neuron_count"]
-        sc = j["synapse_count"]
+        # 规模直接由 C 侧提供，无需临时 JSON 文件
+        nc = int(self.lib.net2_neuron_count(self.net_ptr))
+        sc = int(self.lib.net2_synapse_count(self.net_ptr))
+        if nc != self.config["neuron_count"] or nc <= 0 or sc < 0:
+            raise RuntimeError("DLL topology/count mismatch; rebuild b2_core.dll")
         types     = (ctypes.c_int * nc)()
         pref_x    = (ctypes.c_double * nc)()
         pref_y    = (ctypes.c_double * nc)()
@@ -110,18 +165,21 @@ class CPUBackend:
             pre, post, w,
         )
         neurons = []
+        layers = [0, 0, 0, 0]
         for i in range(nc):
             neurons.append({
                 "id": i, "layer": types[i],
                 "pref_x": pref_x[i], "pref_y": pref_y[i], "pref_omega": pref_om[i],
             })
+            if 0 <= types[i] < 4:
+                layers[types[i]] += 1
         syns = []
         for i in range(sc):
             syns.append({"pre": pre[i], "post": post[i], "w": w[i]})
         return {
             "neuron_count": nc, "synapse_count": sc,
-            "input": j["input"], "hidden": j["hidden"],
-            "motor1": j["motor1"], "motor2": j["motor2"],
+            "input": layers[0], "hidden": layers[1],
+            "motor1": layers[2], "motor2": layers[3],
             "neurons": neurons, "synapses": syns,
         }
 

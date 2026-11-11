@@ -297,6 +297,8 @@ class VecBackend:
     def init(self, input_n, hidden_n, motor1_n, motor2_n, seed=None):
         if seed is None: seed = self.seed
         self._select_backend()
+        # 本后端是独立的 numpy 模拟，不包含 C core 的 PROP_N 本体感觉层。
+        # 这里的 neuron_count 只用于本后端自身的数组，勿与 net2_neuron_count() 混用。
         self.config = {
             "input": input_n, "hidden": hidden_n,
             "motor1": motor1_n, "motor2": motor2_n,
@@ -427,12 +429,34 @@ class VecBackend:
         # 转置权重矩阵预存为连续内存（避免每 tick 转置开销）
         self.Wt = xp.ascontiguousarray(self.W.T)
         self.eligibility_trace = xp.zeros(S, dtype=xp.float32)
+        # 可运行时调节的训练参数（与 C 端 HyperParams2 同名）
+        self.hp = {
+            "learning_rate": 0.15,
+            "tau_stdp": TAU_STDP,
+            "tau_trace": 2000.0,
+            "lambda_trace": math.exp(-1.0 / 2000.0),
+            "stdp_a_plus": 0.05,
+            "stdp_a_minus": 0.06,
+            "weight_decay_lambda": 1e-5,
+            "reward_baseline_window": 200,
+            "psp_factor": PSP_FACTOR,
+            "trace_clamp": 1.0,
+            "decode_mode": 0,
+            "wta_k": 3,
+            "use_reward_baseline": 1,
+            "el_trace": 1,
+            "reward_mod": 1,
+            "reward_baseline": 0.0,
+            "current_tick": 0,
+        }
+        self._reward_queue = []
+        self._baseline_hist = []
         # 物理
         self.arm_theta1 = 0.0
         self.arm_theta2 = 0.0
         self.arm_omega1 = 0.0
         self.arm_omega2 = 0.0
-        self.arm_end_x = 1.0
+        self.arm_end_x = 2.0  # ARM_L1 + ARM_L2，与 benchmark2_core.c 初始末端位置一致
         self.arm_end_y = 0.0
         self.target_x = 0.5
         self.target_y = 0.5
@@ -454,7 +478,9 @@ class VecBackend:
 
     # ========== tick 循环 ==========
     def tick(self):
+        self._apply_reward()      # 与 C 端一致：tick 开头消费上一 tick 注入的奖励
         self.tick_count += 1
+        self.hp["current_tick"] = self.tick_count
         if self._on_gpu and self._kern is not None:
             self._tick_cuda()
         else:
@@ -469,7 +495,7 @@ class VecBackend:
         n2 = self.config["motor2"]
 
         spk_vec = self.is_spiking.astype(cp.float32)
-        current = (self.Wt @ spk_vec) * PSP_FACTOR
+        current = (self.Wt @ spk_vec) * self.hp["psp_factor"]
 
         g = ((N + 255) // 256,)
         self._k_tick(g, (256,), (
@@ -480,10 +506,10 @@ class VecBackend:
             float(SPIKE_THRESHOLD), float(MEMBRANE_DECAY), REFRACTORY_TICKS,
         ))
         self._k_wta((1,), (1,), (
-            self.is_spiking, self.membrane, self.m1_start, n1, max(2, n1 // 3),
+            self.is_spiking, self.membrane, self.m1_start, n1, max(1, self.hp["wta_k"]),
         ))
         self._k_wta((1,), (1,), (
-            self.is_spiking, self.membrane, self.m2_start, n2, max(2, n2 // 3),
+            self.is_spiking, self.membrane, self.m2_start, n2, max(1, self.hp["wta_k"]),
         ))
         self._k_fin(g, (256,), (
             self.is_spiking, self.membrane, self.refractory, self.last_spike_tick,
@@ -493,7 +519,7 @@ class VecBackend:
         self._k_elig(((S + 255) // 256,), (256,), (
             self.eligibility_trace, self.syn_pre, self.syn_post,
             self.is_spiking, self.last_spike_tick, S, self.tick_count,
-            float(LAMBDA_TRACE), float(TAU_STDP),
+            float(self.hp["lambda_trace"]), float(self.hp["tau_stdp"]),
         ))
         self._k_arm((1,), (1,), (
             self.last_spike_tick, self.pref_omega, self.arm_dev,
@@ -516,7 +542,7 @@ class VecBackend:
         self.prev_spiking[:] = self.is_spiking
         self.prev_last_spike[:] = self.last_spike_tick
         spk_vec = self.is_spiking.astype(xp.float32)
-        current = (self.Wt @ spk_vec) * PSP_FACTOR
+        current = (self.Wt @ spk_vec) * self.hp["psp_factor"]
 
         # Step 2: 不应期 → 泄漏衰减 → 阈值判定 → 运动层 k-WTA
         is_input = self.is_input_mask > 0.5
@@ -538,7 +564,7 @@ class VecBackend:
         spiking_f = xp.where(spiking, self.membrane, xp.float32(-1e9))
         for base, count in ((self.m1_start, self.config["motor1"]),
                             (self.m2_start, self.config["motor2"])):
-            K = max(2, count // 3)
+            K = max(1, self.hp["wta_k"])
             seg = spiking_f[base:base + count]
             kth = xp.partition(seg, count - K)[count - K]
             # 与原始发放掩码取交，避免发放数 < K 时把整层误判为发放
@@ -554,14 +580,14 @@ class VecBackend:
 
         # Step 3: R-STDP 资格迹（向量化）
         S = self.topo["synapse_count"]
-        self.eligibility_trace *= LAMBDA_TRACE
+        self.eligibility_trace *= self.hp["lambda_trace"]
         pre_spk = self.is_spiking[self.syn_pre]
         post_spk = self.is_spiking[self.syn_post]
         post_last = self.last_spike_tick[self.syn_post]
         pre_last = self.last_spike_tick[self.syn_pre]
         delta_post = self.tick_count - post_last
         delta_pre = self.tick_count - pre_last
-        tau = TAU_STDP
+        tau = self.hp["tau_stdp"]
         stdp_inc = xp.where(
             (pre_spk > 0) & (post_last >= 0),
             xp.exp(-delta_post.astype(xp.float32) / tau),
@@ -573,7 +599,9 @@ class VecBackend:
             xp.float32(0.0)
         )
         self.eligibility_trace += (stdp_inc - stdp_dec).astype(xp.float32)
-        self.eligibility_trace = xp.clip(self.eligibility_trace, -5.0, 5.0)
+        cl = self.hp["trace_clamp"]
+        self.eligibility_trace = (xp.clip(self.eligibility_trace, -cl, cl)
+                                  if cl > 0 else xp.clip(self.eligibility_trace, -5.0, 5.0))
 
         # Step 4: 解码 omega1, omega2 + 物理模拟（设备端，无主机同步）
         omega1_cmd = xp.clip(self._decode_omega(self.m1_start, self.m2_start), -MAX_OMEGA, MAX_OMEGA)
@@ -613,6 +641,92 @@ class VecBackend:
     def set_target(self, x, y):
         self.target_x = float(x)
         self.target_y = float(y)
+
+    # ========== 训练 / 调参（接口与 CPUBackend 保持一致） ==========
+    def get_arm(self):
+        if self._on_gpu and self._kern is not None:
+            a = self._xp.asnumpy(self.arm_dev)
+            ex, ey = float(a[4]), float(a[5])
+        else:
+            ex, ey = float(self.arm_end_x), float(self.arm_end_y)
+        return (ex, ey, self.target_x, self.target_y, self.max_reach)
+
+    def inject_reward(self, r, delay=0):
+        self._reward_queue.append(float(r))
+
+    def inject_reward2(self, r1, r2, delay=0):
+        self._reward_queue.append(0.5 * (float(r1) + float(r2)))
+
+    def _apply_reward(self):
+        """与 C 端 net2_tick 开头一致：err = r - 滑动基线，dw = lr * err * trace"""
+        if not self._reward_queue:
+            return
+        r = self._reward_queue.pop(0)
+        hp = self.hp
+        hist = self._baseline_hist
+        hist.append(r)
+        win = max(1, int(hp["reward_baseline_window"]))
+        if len(hist) > win:
+            del hist[:len(hist) - win]
+        base = (sum(hist) / len(hist)) if hp["use_reward_baseline"] else 0.0
+        hp["reward_baseline"] = base
+        err = r - base
+        if not hp["reward_mod"] or not hp["el_trace"] or abs(err) < 0.001:
+            return
+        xp = self._xp
+        dw = xp.asarray(hp["learning_rate"] * err * self.eligibility_trace,
+                        dtype=xp.float32)
+        pre, post = self.syn_pre, self.syn_post
+        wv = xp.clip(self.Wt[post, pre] + dw, 0.001, 10.0)
+        self.Wt[post, pre] = wv
+        self.W[pre, post] = wv
+
+    def set_param(self, name, value):
+        hp = self.hp
+        v = float(value)
+        if name == "tau_trace":
+            if v < 1.0: return -1
+            hp["tau_trace"] = v
+            hp["lambda_trace"] = math.exp(-1.0 / v)
+        elif name in ("learning_rate", "tau_stdp", "psp_factor", "trace_clamp",
+                      "weight_decay_lambda", "stdp_a_plus", "stdp_a_minus"):
+            if v < 0.0 or (name == "psp_factor" and v <= 0.0): return -1
+            hp[name] = v
+        elif name in ("reward_baseline_window", "wta_k", "decode_mode",
+                      "use_reward_baseline", "el_trace", "reward_mod"):
+            hp[name] = int(v)
+        else:
+            return -1
+        return 0
+
+    def get_param(self, name):
+        return float(self.hp.get(name, float("nan")))
+
+    def episode_reset(self, tx, ty):
+        """结束一轮：关节/神经元状态归位，保留权重、资格迹与奖励基线"""
+        self.arm_theta1 = 0.0
+        self.arm_theta2 = 0.0
+        self.arm_omega1 = 0.0
+        self.arm_omega2 = 0.0
+        self.arm_end_x = 2.0
+        self.arm_end_y = 0.0
+        self.set_target(float(tx), float(ty))
+        self.membrane[:] = MEMBRANE_REST
+        self.is_spiking[:] = 0
+        self.prev_spiking[:] = 0
+        self.last_spike_tick[:] = -1
+        self.prev_last_spike[:] = -1
+        self.refractory[:] = 0
+        self._reward_queue.clear()
+        if self._on_gpu and self.arm_dev is not None:
+            self.arm_dev[:] = self._xp.asarray([0, 0, 0, 0, 2, 0],
+                                               dtype=self._xp.float64)
+
+    def reset_ema(self):
+        pass
+
+    def destroy(self):
+        pass
 
     # ========== 快照 ==========
     def get_snapshot_arrays(self):

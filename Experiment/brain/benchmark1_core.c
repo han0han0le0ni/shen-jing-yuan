@@ -475,6 +475,7 @@ static void process_reward_queue(NetworkState* net) {
  * 权重软遗忘（惰性衰减：仅在被访问突触上批量计算）
  * ============================================================ */
 static void lazy_decay_weights(NetworkState* net) {
+    (void)net;  /* 当前实现不访问网络状态，显式标注以避免 -Wunused-parameter */
     /* Benchmark-1 简化：不在tick循环中做全局扫描
      * 遗忘机制主要由资格迹截断（±5.0）和权重边界 clamp 提供自然约束
      * 完整遗忘在后续基准中实现 */

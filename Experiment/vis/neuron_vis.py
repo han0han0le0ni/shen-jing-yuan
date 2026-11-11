@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
     QPushButton, QLabel, QComboBox, QDoubleSpinBox, QSpinBox, QCheckBox,
     QFrame, QSplitter, QToolTip, QMessageBox,
+    QDockWidget, QTabWidget, QScrollArea, QFormLayout,
     QGraphicsScene, QGraphicsView, QGraphicsEllipseItem,
     QGraphicsPathItem, QGraphicsTextItem,
 )
@@ -224,14 +225,69 @@ PRESETS = [
     ("极限 · 4400", 144, 4000, 128, 128),
 ]
 DEVICES = [("CUDA · RTX 5060", "cuda"), ("向量化 · 12 核", "numpy"),
-           ("C DLL · 原生", "cdll")]
+           ("C DLL · 原生 · 可训练", "cdll")]
+DEFAULT_DEVICE_INDEX = 2   # C DLL：参数最全、与 headless 训练完全同源
+
+# 可调设置：(key, 标签, 类型, 默认值, 范围/选项, 提示)
+# 类型 bool / int / float / combo；范围 = (最小, 最大, 步长)
+TRAIN_SPECS = [
+    ("训练与奖励", [
+        ("train_enabled", "启用在线训练", "bool", True, None,
+         "关闭后窗口只仿真：不注入奖励、不结算轮次"),
+        ("auto_target", "每轮重置随机换目标", "bool", True, None,
+         "勾选：每次重置/新一轮随机换位置；取消：沿用当前目标重来"),
+        ("arrive_radius", "碰到目标半径", "float", 0.15, (0.01, 2.0, 0.01),
+         "末端进入该半径即算碰到目标，结算奖励并结束本轮"),
+        ("arrive_bonus", "到达奖励", "float", 1.0, (0.0, 20.0, 0.1),
+         "首次碰到目标的一次性奖励"),
+        ("speed_bonus", "速度奖励系数", "float", 5.0, (0.0, 50.0, 0.5),
+         "额外奖励 = 系数 × 剩余步数占比，越快到达越高"),
+        ("step_cost", "每步成本", "float", 0.01, (0.0, 1.0, 0.001),
+         "每个 tick 扣除，步数越多代价越大"),
+        ("score_horizon", "评分参考步数", "int", 1000, (10, 20000, 10),
+         "只用于速度评分归一化，超过也只把速度分清零，不结束本轮"),
+        ("reward_mode", "即时奖励模式", "combo", "combo1",
+         ["combo1", "potential"], "combo1 = 方向 + 距离缩短；potential = 越近越高"),
+    ]),
+    ("学习超参", [
+        ("learning_rate", "学习率", "float", 0.15, (0.0, 2.0, 0.01),
+         "R-STDP 权重更新幅度"),
+        ("tau_trace", "资格迹时间常数", "float", 2000.0, (1.0, 5000.0, 50.0),
+         "修改时同步重算 lambda_trace"),
+        ("tau_stdp", "STDP 时间常数", "float", 50.0, (1.0, 500.0, 1.0), ""),
+        ("psp_factor", "突触电流增益", "float", 25.0, (0.1, 200.0, 1.0), ""),
+        ("trace_clamp", "资格迹截断", "float", 1.0, (0.0, 20.0, 0.1),
+         "0 表示不截断"),
+        ("wta_k", "运动层 WTA 数", "int", 3, (1, 64, 1), ""),
+        ("decode_mode", "解码模式", "combo", 0,
+         ["0 · WTA 均值", "2 · 膜电位加权"], "运动层群体解码方式"),
+        ("use_reward_baseline", "减奖励基线", "bool", True, None,
+         "关闭后常数步数成本会变成持续负误差"),
+        ("reward_baseline_window", "基线窗口", "int", 200, (1, 5000, 10),
+         "最近 N 个 tick 的平均奖励"),
+        ("stdp_a_plus", "LTP 幅值", "float", 0.05, (0.0, 1.0, 0.01),
+         "仅 C DLL 后端生效"),
+        ("stdp_a_minus", "LTD 幅值", "float", 0.06, (0.0, 1.0, 0.01),
+         "仅 C DLL 后端生效"),
+        ("weight_decay_lambda", "权重衰减", "float", 0.00001,
+         (0.0, 0.1, 0.00001), "仅 C DLL 后端生效"),
+        ("el_trace", "启用资格迹", "bool", True, None, "消融开关"),
+        ("reward_mod", "启用奖励调制", "bool", True, None, "消融开关"),
+    ]),
+    ("运行与网络", [
+        ("avg_conn", "平均每神经元连接", "float", 8.0, (1.0, 32.0, 1.0),
+         "修改后点工具条「应用配置」重建网络"),
+    ]),
+]
+DEFAULT_TRAIN_CFG = {s[0]: s[3] for _, specs in TRAIN_SPECS for s in specs}
+CPARAM_KEYS = {s[0] for s in TRAIN_SPECS[1][1]}   # 需要写入后端的运行时参数
 
 
 # ============================================================
 # 后端封装
 # ============================================================
 class SimEngine:
-    """统一三种后端；安全销毁、统一拓扑/快照接口"""
+    """统一三种后端 + 在线训练循环（每 tick 注入奖励、碰到目标结算并重置重来）"""
 
     def __init__(self, dll_path):
         self.dll = dll_path
@@ -239,6 +295,21 @@ class SimEngine:
         self.initialized = False
         self.name = "—"
         self.on_gpu = False
+        self.train_cfg = dict(DEFAULT_TRAIN_CFG)
+        self.manual_target = (0.5, 0.5)
+        self.last_reward = 0.0
+        self.total_reward = 0.0
+        self.last_arrival_reward = 0.0
+        self.episode = 0
+        self.arrivals = 0
+        self.trial_tick = 0
+        self.last_episode_ticks = 0
+        self.prev_ex, self.prev_ey = 2.0, 0.0
+        self.arrived_this_episode = False
+
+    @property
+    def training_supported(self):
+        return bool(getattr(self.be, "can_train", True))
 
     def reset(self, device_key, cfg, seed, avg_conn=8.0):
         self.destroy()
@@ -259,10 +330,100 @@ class SimEngine:
         self.name = ("CUDA · CuPy" if self.on_gpu else
                      ("向量化 · OpenBLAS" if device_key == "numpy" else
                       "C DLL · flat buffer"))
+        self._reset_trial_state()
         return be.get_topology()
+
+    def _reset_trial_state(self):
+        self.last_reward = 0.0
+        self.total_reward = 0.0
+        self.last_arrival_reward = 0.0
+        self.episode = 0
+        self.arrivals = 0
+        self.trial_tick = 0
+        self.last_episode_ticks = 0
+        self.prev_ex, self.prev_ey = 2.0, 0.0
+        self.arrived_this_episode = False
 
     def tick(self):
         self.be.tick()
+
+    def train_tick(self):
+        """一个仿真步：推进物理 → 计算即时奖励 → 注入 → 判定结算/重来"""
+        be = self.be
+        c = self.train_cfg
+        if not c["train_enabled"] or not self.training_supported:
+            be.tick()
+            return
+        be.tick()
+        ex, ey, tx, ty, _ = be.get_arm()
+        dist = math.hypot(ex - tx, ey - ty)
+        vx, vy = ex - self.prev_ex, ey - self.prev_ey
+        tvx, tvy = tx - ex, ty - ey
+        vmag = math.hypot(vx, vy)
+        cos_r = ((vx * tvx + vy * tvy) / (vmag * dist)
+                 if vmag > 1e-6 and dist > 1e-6 else 0.0)
+        prev_d = math.hypot(tx - self.prev_ex, ty - self.prev_ey)
+        delta = max(-1.0, min(1.0, (prev_d - dist) * 100.0))
+        if c["reward_mode"] == "potential":
+            init_d = max(1e-6, math.hypot(tx - 2.0, ty))
+            r = 1.0 - dist / init_d
+        else:
+            r = 0.5 * cos_r + 0.5 * delta
+        r -= c["step_cost"]
+
+        horizon = max(1, int(c["score_horizon"]))
+        just_arrived = False
+        if not self.arrived_this_episode and dist <= c["arrive_radius"]:
+            self.arrived_this_episode = True
+            just_arrived = True
+            # 速度分：只按参考步数归一化，超过参考步数只是得 0 分，不结束本轮
+            remain = max(0.0, (horizon - 1 - self.trial_tick) / horizon)
+            r += c["arrive_bonus"] + c["speed_bonus"] * remain
+            self.last_arrival_reward = r
+        be.inject_reward(r, 0)
+        self.last_reward = r
+        self.total_reward += r
+        self.trial_tick += 1
+        self.prev_ex, self.prev_ey = ex, ey
+
+        if just_arrived:   # 碰到目标是本轮唯一的结束条件
+            be.tick()      # 消费刚注入的奖励（含到达奖励），否则重置时会被清队列丢掉
+            self.episode += 1
+            self.arrivals += 1
+            self.last_episode_ticks = self.trial_tick
+            ntx, nty = self._next_target()
+            self.episode_reset(ntx, nty)
+
+    def episode_reset(self, tx, ty):
+        """重置一轮：后端归位，同时同步窗口侧的本轮计数（外部也可安全调用）"""
+        self.be.episode_reset(tx, ty)
+        self.prev_ex, self.prev_ey = 2.0, 0.0
+        self.trial_tick = 0
+        self.arrived_this_episode = False
+
+    def _next_target(self):
+        if not self.train_cfg["auto_target"]:
+            return self.manual_target
+        r = 0.3 + random.random() * 1.2
+        a = random.random() * math.pi * 2
+        return (round(r * math.cos(a), 2), round(r * math.sin(a), 2))
+
+    def set_params(self, values):
+        """把运行时参数写入后端，返回当前后端不支持的参数名"""
+        failed = []
+        for key, value in values.items():
+            try:
+                if self.be.set_param(key, float(value)) != 0:
+                    failed.append(key)
+            except Exception:
+                failed.append(key)
+        return failed
+
+    def get_param(self, name):
+        try:
+            return self.be.get_param(name)
+        except Exception:
+            return float("nan")
 
     def snapshot(self):
         # 统一成 (mem, spk, arm, meta)，丢掉用不到的 last_spike
@@ -270,7 +431,8 @@ class SimEngine:
         return mem, spk, arm, meta
 
     def set_target(self, x, y):
-        self.be.set_target(x, y)
+        self.manual_target = (float(x), float(y))
+        self.be.set_target(float(x), float(y))
 
     def destroy(self):
         if self.initialized:
@@ -314,7 +476,7 @@ class SimWorker(QThread):
         while self._running:
             try:
                 for _ in range(self._steps):
-                    self.engine.tick()
+                    self.engine.train_tick()
                 mem, spk, arm, meta = self.engine.snapshot()
                 snap = (np.ascontiguousarray(mem, dtype=np.float32),
                         np.ascontiguousarray(spk, dtype=np.int32),
@@ -1008,9 +1170,11 @@ class MainWindow(QMainWindow):
         self.engine = engine
         self.theme_key = theme_key
         self.T = THEMES[theme_key]
-        self.setWindowTitle("脉冲神经网络 · 实时可视化  |  Benchmark-2 · CUDA")
-        self.resize(1600, 1000)
-        self.setMinimumSize(1200, 760)
+        self._initializing = True      # 构建控件期间屏蔽信号触发的 _reset
+        self.controls = {}
+        self.setWindowTitle("脉冲神经网络 · 实时训练可视化  |  Benchmark-2")
+        self.resize(1680, 1000)
+        self.setMinimumSize(1280, 760)
 
         root = QWidget()
         root.setObjectName("Root")
@@ -1019,6 +1183,7 @@ class MainWindow(QMainWindow):
         lay.setSpacing(10)
         self.setCentralWidget(root)
 
+        self._build_settings_dock()
         lay.addWidget(self._build_header())
         lay.addWidget(self._build_controls())
         lay.addWidget(self._build_config())
@@ -1056,7 +1221,8 @@ class MainWindow(QMainWindow):
 
         for key, fn in (("Space", self._toggle_play), ("S", self._step_once),
                         ("R", self._reset), ("T", self._random_target),
-                        ("F", self.net_view.reset_view)):
+                        ("F", self.net_view.reset_view),
+                        ("P", self._toggle_settings)):
             act = QAction(self)
             act.setShortcut(QKeySequence(key))
             act.triggered.connect(fn)
@@ -1075,6 +1241,7 @@ class MainWindow(QMainWindow):
         self._last_target = None
         self._error = ""
 
+        self._initializing = False
         self._refresh_badge()
         self._reset()
 
@@ -1095,9 +1262,9 @@ class MainWindow(QMainWindow):
         v = QVBoxLayout(box)
         v.setContentsMargins(0, 0, 0, 0)
         v.setSpacing(2)
-        t = QLabel("脉冲神经网络 · CUDA 实时可视化")
+        t = QLabel("脉冲神经网络 · 在线训练可视化")
         t.setObjectName("Title")
-        s = QLabel("Benchmark-2   |   QThread + CuPy 融合核   |   大规模脉冲网络交互分析")
+        s = QLabel("Benchmark-2   |   碰到目标即结算并重来   |   逐 tick R-STDP · 参数实时可调")
         s.setObjectName("Subtitle")
         v.addWidget(t)
         v.addWidget(s)
@@ -1161,8 +1328,9 @@ class MainWindow(QMainWindow):
         hl.addWidget(group("计算设备"))
         self.combo_dev = QComboBox()
         self.combo_dev.addItems([d[0] for d in DEVICES])
-        self.combo_dev.setMinimumWidth(150)
+        self.combo_dev.setMinimumWidth(170)
         self.combo_dev.currentIndexChanged.connect(lambda _: self._reset())
+        self.combo_dev.setCurrentIndex(DEFAULT_DEVICE_INDEX)
         hl.addWidget(self.combo_dev)
         hl.addWidget(group("速度"))
         self.combo_speed = QComboBox()
@@ -1195,6 +1363,17 @@ class MainWindow(QMainWindow):
         b.setToolTip("快捷键 T")
         b.clicked.connect(self._random_target)
         hl.addWidget(b)
+        hl.addSpacing(4)
+        hl.addWidget(sep())
+        b = QPushButton("⚙ 设置")
+        b.setObjectName("Ghost")
+        b.setToolTip("显示/隐藏训练与参数面板（快捷键 P）")
+        b.clicked.connect(self._toggle_settings)
+        hl.addWidget(b)
+        self.lbl_trial = QLabel("第 0 轮 · 到达 0")
+        self.lbl_trial.setObjectName("Perf")
+        self.lbl_trial.setToolTip("累计完成轮次 / 碰到目标次数 / 本轮步数")
+        hl.addWidget(self.lbl_trial)
         hl.addStretch(1)
         return bar
 
@@ -1235,6 +1414,143 @@ class MainWindow(QMainWindow):
         hl.addStretch(1)
         return bar
 
+    # ---------- 训练与参数面板（可停靠 / 可隐藏，不挤压可视化区域） ----------
+    def _make_param_widget(self, spec):
+        key, _label, kind, default, rng, tip = spec
+        if kind == "bool":
+            w = QCheckBox()
+            w.setChecked(bool(default))
+        elif kind == "int":
+            lo, hi, step = rng
+            w = QSpinBox()
+            w.setRange(int(lo), int(hi))
+            w.setSingleStep(int(step))
+            w.setValue(int(default))
+        elif kind == "float":
+            lo, hi, step = rng
+            w = QDoubleSpinBox()
+            w.setRange(float(lo), float(hi))
+            w.setSingleStep(float(step))
+            w.setDecimals(5 if step < 0.001 else (3 if step < 0.1 else 2))
+            w.setValue(float(default))
+        else:
+            w = QComboBox()
+            w.addItems([str(o) for o in rng])
+            if key == "decode_mode":
+                w.setCurrentIndex(1 if int(default) == 2 else 0)
+            elif default in rng:
+                w.setCurrentIndex(rng.index(default))
+        w.setToolTip(tip)
+        return w
+
+    def _build_settings_dock(self):
+        dock = QDockWidget("训练与参数", self)
+        dock.setObjectName("SettingsDock")
+        dock.setAllowedAreas(Qt.DockWidgetArea.LeftDockWidgetArea |
+                             Qt.DockWidgetArea.RightDockWidgetArea)
+        tabs = QTabWidget()
+        for group, specs in TRAIN_SPECS:
+            page = QWidget()
+            form = QFormLayout(page)
+            form.setContentsMargins(10, 10, 10, 10)
+            form.setSpacing(7)
+            form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+            for spec in specs:
+                w = self._make_param_widget(spec)
+                self.controls[spec[0]] = w
+                lab = QLabel(spec[1])
+                lab.setToolTip(spec[5])
+                form.addRow(lab, w)
+            scroll = QScrollArea()
+            scroll.setWidgetResizable(True)
+            scroll.setWidget(page)
+            tabs.addTab(scroll, group)
+        btn_apply = QPushButton("应用设置")
+        btn_apply.setObjectName("Primary")
+        btn_apply.setToolTip("立即写入后端；连接数等规模参数需再点「应用配置」重建网络")
+        btn_apply.clicked.connect(self._apply_settings)
+        btn_default = QPushButton("恢复默认")
+        btn_default.clicked.connect(self._restore_defaults)
+        row = QWidget()
+        h = QHBoxLayout(row)
+        h.setContentsMargins(8, 6, 8, 8)
+        h.setSpacing(8)
+        h.addWidget(btn_default)
+        h.addWidget(btn_apply, 1)
+        box = QWidget()
+        v = QVBoxLayout(box)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(0)
+        v.addWidget(tabs, 1)
+        v.addWidget(row)
+        dock.setWidget(box)
+        dock.setMinimumWidth(300)
+        self.settings_dock = dock
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock)
+        self._apply_settings(silent=True)
+
+    def _param_values(self):
+        vals = {}
+        for key, w in self.controls.items():
+            if isinstance(w, QCheckBox):
+                vals[key] = bool(w.isChecked())
+            elif isinstance(w, QComboBox):
+                if key == "decode_mode":
+                    vals[key] = 2 if w.currentIndex() == 1 else 0
+                else:
+                    vals[key] = w.currentText()
+            else:
+                vals[key] = float(w.value())
+        return vals
+
+    def _apply_settings(self, silent=False):
+        vals = self._param_values()
+        self.engine.train_cfg.update(vals)
+        failed = []
+        if self.engine.initialized:
+            failed = self.engine.set_params({k: v for k, v in vals.items()
+                                             if k in CPARAM_KEYS})
+        self._update_trial_label()
+        if not silent:
+            if failed:
+                self.lbl_cfg.setText("当前后端不支持：" + "、".join(failed))
+            else:
+                self.lbl_cfg.setText("设置已应用 · 在线生效（连接数需重建网络）")
+        return failed
+
+    def _restore_defaults(self):
+        for _, specs in TRAIN_SPECS:
+            for key, _label, kind, default, rng, _tip in specs:
+                w = self.controls.get(key)
+                if w is None:
+                    continue
+                if isinstance(w, QCheckBox):
+                    w.setChecked(bool(default))
+                elif isinstance(w, QComboBox):
+                    if key == "decode_mode":
+                        w.setCurrentIndex(1 if int(default) == 2 else 0)
+                    elif default in rng:
+                        w.setCurrentIndex(rng.index(default))
+                else:
+                    w.setValue(default)
+        self._apply_settings(silent=True)
+        self.lbl_cfg.setText("已恢复默认设置")
+
+    def _toggle_settings(self):
+        self.settings_dock.setVisible(not self.settings_dock.isVisible())
+
+    def _update_trial_label(self):
+        if not hasattr(self, "lbl_trial"):
+            return
+        e = self.engine
+        horizon = max(1, int(e.train_cfg["score_horizon"]))
+        state = ("训练中" if e.train_cfg["train_enabled"] and e.training_supported
+                 else "仅仿真")
+        self.lbl_trial.setText(
+            f"{state} · 第 {e.episode} 轮 · 到达 {e.arrivals} · "
+            f"本轮 {e.trial_tick} tick（评分参考 {horizon}） · "
+            f"上轮 {e.last_episode_ticks} tick · 到达奖励 {e.last_arrival_reward:+.2f}")
+
     def _build_footer(self):
         card = QFrame()
         card.setObjectName("Card")
@@ -1248,7 +1564,8 @@ class MainWindow(QMainWindow):
         self.metrics = {}
         for key, label in (("step", "仿真步数"), ("spike", "发放神经元"),
                           ("dist", "末端距离"), ("ratio", "距离 / 臂长"),
-                          ("reward", "即时奖励"), ("total", "累计奖励")):
+                          ("reward", "即时奖励"), ("total", "累计奖励"),
+                          ("episode", "完成轮次"), ("trial", "本轮步数")):
             m = MetricCard(label)
             h.addWidget(m, 1)
             self.metrics[key] = m
@@ -1274,7 +1591,7 @@ class MainWindow(QMainWindow):
             h2.addSpacing(5)
             h2.addWidget(q)
         h2.addStretch(1)
-        q = QLabel("空格 运行/暂停 · S 单步 · R 重置 · T 随机 · F 适应窗口")
+        q = QLabel("空格 运行/暂停 · S 单步 · R 重置 · T 随机 · F 适应窗口 · P 设置面板")
         q.setObjectName("Hint")
         h2.addWidget(q)
         lay.addWidget(row2)
@@ -1309,14 +1626,18 @@ class MainWindow(QMainWindow):
         return PRESETS[idx][1:]
 
     def _reset(self):
+        if self._initializing:
+            return
         self._pause()
         self._error = ""
         cfg = self._current_cfg()
         dev = DEVICES[max(0, self.combo_dev.currentIndex())][1]
         seed = (self.spin_seed.value() if self.chk_seed.isChecked()
                 else random.randint(0, 999999))
+        avg_conn = (float(self.controls["avg_conn"].value())
+                    if "avg_conn" in self.controls else 8.0)
         try:
-            topo = self.engine.reset(dev, cfg, seed)
+            topo = self.engine.reset(dev, cfg, seed, avg_conn=avg_conn)
         except Exception as e:
             self._error = f"{type(e).__name__}: {e}"
             self._refresh_badge()
@@ -1326,7 +1647,11 @@ class MainWindow(QMainWindow):
         self.chart.clear()
         self.arm_view.clearTrail()
         self._last_target = None
-        self._set_target()
+        self._apply_settings(silent=True)
+        if self.engine.train_cfg.get("auto_target"):
+            self._random_target()
+        else:
+            self._set_target()
         self._total_reward = 0.0
         self._last_snap = self.engine.snapshot()
         self.lbl_cfg.setText(
@@ -1377,7 +1702,7 @@ class MainWindow(QMainWindow):
     def _step_once(self):
         if self.is_playing or not self.engine.initialized:
             return
-        self.engine.tick()
+        self.engine.train_tick()
         self._last_snap = self.engine.snapshot()
         self._refresh_frame(self._last_snap)
 
@@ -1439,8 +1764,9 @@ class MainWindow(QMainWindow):
         sp = int(np.count_nonzero(spk))
         dist = math.hypot(ex - tx, ey - ty)
         ratio = dist / mr if mr > 0 else 0.0
-        r = float(arm[8])
-        self._total_reward += r
+        r = (float(self.engine.last_reward)
+             if self.engine.train_cfg["train_enabled"] else float(arm[8]))
+        self._total_reward = self.engine.total_reward
         T = self.T
         self.metrics["step"].set_value(f"{int(meta[0]):,}")
         self.metrics["spike"].set_value(f"{sp} / {len(mem)}")
@@ -1449,7 +1775,10 @@ class MainWindow(QMainWindow):
         self.metrics["reward"].set_value(f"{r:+.4f}",
                                         T["ok"] if r >= 0 else T["warn"])
         self.metrics["total"].set_value(f"{self._total_reward:+.1f}")
+        self.metrics["episode"].set_value(f"{self.engine.episode}")
+        self.metrics["trial"].set_value(f"{self.engine.trial_tick}")
         self.chart.push(r, dist, sp / len(mem) if len(mem) else 0.0)
+        self._update_trial_label()
 
     def closeEvent(self, event):
         self.gui_timer.stop()

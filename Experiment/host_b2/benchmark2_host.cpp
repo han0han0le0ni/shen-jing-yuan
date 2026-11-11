@@ -1,9 +1,10 @@
-﻿/*
+﻿﻿/*
  * benchmark2_host.cpp - Benchmark-2 宿主测试驱动
  * 两关节虚拟臂到达任务
  *
- * 场景：随机生成 N 个目标点 → 每个目标连续运行 K ticks → 记录末端距离曲线
- * 通过判据：训练后末端距离中位数 ≤ 初始距离 20%
+ * 场景：每轮生成目标（默认每轮随机换位置，也可固定/循环）→ 一路跑到碰到目标
+ *       → 结算奖励并重置重来（无超时；时间与步数只用于评分）
+ * 通过判据：训练后末端距离的标准中位数 ≤ 初始距离 20%
  */
 
 #include <cstdio>
@@ -29,10 +30,36 @@ struct B2Config {
     int motor2_n   = 50;     /* 关节2运动神经元 */
     double avg_conn = 8.0;
     
-    int episodes     = 20;   /* 目标点数量 */
-    int ticks_per_ep = 1000; /* 每个目标的运行 ticks */
+    int episodes     = 20;   /* 尝试轮数：每轮一直跑到碰到目标 */
+    int score_horizon = 1000; /* 速度评分参考步数：只参与奖励计算，不终止本轮 */
+    int max_ticks_per_ep = 100000; /* 单轮安全阀，防止永远到不了目标；0 = 不设限（不是评分规则） */
     unsigned int seed = 12345;
-    std::string out_csv = "E:/shen_jing_yuan/Experiment/data_b2/results.csv";
+    std::string out_csv = "data_b2/results.csv";  /* 相对 Experiment 目录，跨机器可复现 */
+    
+    /* 可回退的实验开关：默认值 = 旧版硬编码值 */
+    double psp_factor = 25.0;
+    double trace_clamp = 1.0;
+    double tau_trace = 2000.0;
+    int decode_mode = 0;          /* 0=WTA 均值, 2=膜电位加权 */
+    int wta_k = 3;
+    int reward_mode = 0;          /* 0=combo1, 1=势能(1-dist/init) */
+    int use_reward_baseline = 1;
+    std::string preset = "legacy";
+    int target_mode = 0;          /* 0=每轮随机换位置, 1=固定, 2=四目标循环 */
+    double fixed_tx = 1.5, fixed_ty = 0.5;
+
+    /* 一轮 = 从初始臂形一直到碰到目标；没有超时/步数终止，碰到即结算并重置重来。
+     * 时间与步数只作为评分项：
+     *   每 tick 扣 step_cost；首次到达奖励 = arrive_bonus +
+     *   speed_bonus × max(0, (score_horizon-已用步数)/score_horizon)，
+     *   到得越快，剩余比例越高、奖励越高；超过参考步数只是速度项为 0，不结束本轮。
+     * speed_mode=0 回退到旧的「固定步数、不结算」对照行为。
+     * 常数 step_cost 会被滑动基线大部分抵消，真正驱动“更快”的是首达奖励，请保持 baseline=1。 */
+    int speed_mode       = 1;
+    double step_cost     = 0.01;  /* 每 tick 步数成本 */
+    double arrive_radius = 0.15;  /* 碰到目标的判定半径 */
+    double arrive_bonus  = 1.0;   /* 首次碰到目标的基础奖励 */
+    double speed_bonus   = 5.0;   /* 速度评分系数（按剩余步数比例给分） */
 };
 
 static unsigned int h_rand;
@@ -41,28 +68,28 @@ static inline double hu() {
     return (double)((h_rand >> 16) & 0x7FFF) / 32767.0;
 }
 
-/* 生成可达 target：在 origin 圆和 (2,0) 圆的交集内
- * 两个圆半径都是 2.0，交集在 x ≥ 1.0 区域
- * TARGET_MODE: 0=随机 1=固定(1.5,0.5)诊断 2=4目标循环(判别跨目标干扰) */
-#define TARGET_MODE 2
-static int g_ep_for_target = 0;
-static void gen_target(double* tx, double* ty) {
-#if TARGET_MODE == 1
-    *tx = 1.5; *ty = 0.5;
-#elif TARGET_MODE == 2
-    static const double T4[4][2] = {{1.5,0.5},{1.5,-0.5},{1.0,0.9},{1.0,-0.9}};
-    *tx = T4[g_ep_for_target % 4][0];
-    *ty = T4[g_ep_for_target % 4][1];
-#else
+/* 目标生成：target_mode 0=每轮随机换位置 1=固定 2=四目标循环
+ * 随机模式限制在原点圆与 (2,0) 圆的交集内，保证两关节可达。 */
+static void gen_target(const B2Config& cfg, int ep, double* tx, double* ty) {
+    if (cfg.target_mode == 1) {
+        *tx = cfg.fixed_tx;
+        *ty = cfg.fixed_ty;
+        return;
+    }
+    if (cfg.target_mode == 2) {
+        static const double T4[4][2] = {{1.5,0.5},{1.5,-0.5},{1.0,0.9},{1.0,-0.9}};
+        *tx = T4[ep % 4][0];
+        *ty = T4[ep % 4][1];
+        return;
+    }
     double max_reach = ARM_L1 + ARM_L2;
     double sx = max_reach;
-    
     for (int tries = 0; tries < 100; tries++) {
         double r = 0.3 + hu() * 1.5;
         double theta = hu() * 2.0 * M_PI;
         *tx = sx + r * cos(theta);
         *ty = r * sin(theta);
-        
+
         double dist_origin = sqrt(*tx * *tx + *ty * *ty);
         if (dist_origin <= max_reach - 0.01) {
             double dist_from_start = sqrt((*tx - sx) * (*tx - sx) + (*ty) * (*ty));
@@ -71,37 +98,112 @@ static void gen_target(double* tx, double* ty) {
             }
         }
     }
-    *tx = 1.5; *ty = 0.5;
-#endif
+    *tx = cfg.fixed_tx;
+    *ty = cfg.fixed_ty;
 }
 
 int main(int argc, char* argv[]) {
     B2Config cfg;
+    bool force_no_trace = false;
+    bool force_no_reward = false;
     for (int i = 1; i < argc; i++) {
         std::string a = argv[i];
         auto next = [&](int& v) { if (i+1<argc) v = atoi(argv[++i]); };
-        auto nextd = [&](double& v) { if (i+1<argc) v = atof(argv[++i]); };
+        auto nextf = [&](double& v) { if (i+1<argc) v = atof(argv[++i]); };
         if (a == "--input")     next(cfg.input_n);
         else if (a == "--hidden")  next(cfg.hidden_n);
         else if (a == "--motor")   { next(cfg.motor1_n); cfg.motor2_n = cfg.motor1_n; }
         else if (a == "--episodes") next(cfg.episodes);
-        else if (a == "--ticks")   next(cfg.ticks_per_ep);
+        else if (a == "--ticks")   next(cfg.score_horizon);   /* 兼容旧名：评分参考步数 */
+        else if (a == "--score-horizon") next(cfg.score_horizon);
+        else if (a == "--max-ticks")     next(cfg.max_ticks_per_ep);
+        else if (a == "--target-mode") {
+            std::string m = (i+1<argc) ? argv[++i] : "";
+            cfg.target_mode = (m == "fixed") ? 1 : (m == "cycle" ? 2 : 0);
+        }
+        else if (a == "--target-x")     nextf(cfg.fixed_tx);
+        else if (a == "--target-y")     nextf(cfg.fixed_ty);
+        else if (a == "--random-target") cfg.target_mode = 0;
+        else if (a == "--fixed-target")  cfg.target_mode = 1;
         else if (a == "--seed")    { if (i+1<argc) cfg.seed = strtoul(argv[++i], nullptr, 10); }
         else if (a == "--out")     { if (i+1<argc) cfg.out_csv = argv[++i]; }
-        else if (a == "--disable_trace")  { /* 编译时宏控制 */ }
-        else if (a == "--disable_reward") { /* 编译时宏控制 */ }
+        else if (a == "--disable_trace")  force_no_trace = true;
+        else if (a == "--disable_reward") force_no_reward = true;
+        else if (a == "--psp")          nextf(cfg.psp_factor);
+        else if (a == "--trace-clamp")  nextf(cfg.trace_clamp);
+        else if (a == "--tau-trace")    nextf(cfg.tau_trace);
+        else if (a == "--wta-k")        next(cfg.wta_k);
+        else if (a == "--decode-mode")  { std::string m = (i+1<argc) ? argv[++i] : ""; cfg.decode_mode = (m == "weighted") ? 2 : 0; }
+        else if (a == "--reward-mode")  { std::string m = (i+1<argc) ? argv[++i] : ""; cfg.reward_mode = (m == "potential") ? 1 : 0; }
+        else if (a == "--no-reward-baseline") cfg.use_reward_baseline = 0;
+        else if (a == "--preset")       { if (i+1<argc) cfg.preset = argv[++i]; }
+        else if (a == "--speed-reward")     cfg.speed_mode = 1;
+        else if (a == "--no-speed-reward")  cfg.speed_mode = 0;
+        else if (a == "--step-cost")        nextf(cfg.step_cost);
+        else if (a == "--arrive-radius")    nextf(cfg.arrive_radius);
+        else if (a == "--arrive-bonus")     nextf(cfg.arrive_bonus);
+        else if (a == "--speed-bonus")      nextf(cfg.speed_bonus);
         else if (a == "--help" || a == "-h") {
-            printf("Usage: %s [--input N --hidden N --motor N --episodes N --ticks N --seed N --out FILE]\n", argv[0]);
+            printf("Usage: %s [--input N --hidden N --motor N --episodes N --seed N --out FILE]\n"
+                   "       [--score-horizon N (速度评分参考步数，不终止本轮；--ticks 为旧别名)]\n"
+                   "       [--max-ticks N (单轮安全阀，0=不设限，默认 100000)]\n"
+                   "       [--target-mode random|fixed|cycle] [--target-x F --target-y F]\n"
+                   "       [--random-target] [--fixed-target]\n"
+                   "       [--disable_trace] [--disable_reward]\n"
+                   "       [--preset legacy|fix1|fix2|fix3]\n"
+                   "       [--psp F --wta-k K --decode-mode wta|weighted --reward-mode combo1|potential]\n"
+                   "       [--no-reward-baseline --tau-trace F --trace-clamp F]\n"
+                   "       [--speed-reward (默认：每步成本 + 首达奖励 + 碰到即结算重来)]\n"
+                   "       [--no-speed-reward (旧对照：固定步数、不结算)]\n"
+                   "       [--step-cost F --arrive-radius F --arrive-bonus F --speed-bonus F]\n", argv[0]);
             return 0;
         }
+    }
+    
+    /* 预设逐级叠加，便于 A/B；legacy 与旧版完全等价。
+     * A/B 结论：fix1 有效（median 0.82→0.62）；fix2/fix3 的势能奖励与短 trace 实测更差，
+     * 保留仅作对照，正式实验请使用 legacy 或 fix1。 */
+    if (cfg.preset == "fix1" || cfg.preset == "fix2" || cfg.preset == "fix3") {
+        cfg.wta_k = 1;             /* 1) 解码层：单 winner，避免正负 pref_omega 互相抵消 */
+    }
+    if (cfg.preset == "fix2" || cfg.preset == "fix3") {
+        cfg.reward_mode = 1; cfg.use_reward_baseline = 0;          /* 2) 奖励层（对照用） */
+    }
+    if (cfg.preset == "fix3") {
+        cfg.tau_trace = 200.0; cfg.trace_clamp = 2.0;              /* 3) 资格迹（对照用） */
+    }
+    if (cfg.preset != "legacy" && cfg.preset != "fix1" &&
+        cfg.preset != "fix2" && cfg.preset != "fix3") {
+        fprintf(stderr, "Unknown preset: %s\n", cfg.preset.c_str());
+        return 1;
+    }
+    
+    if (cfg.episodes < 1 || cfg.score_horizon < 1 || cfg.max_ticks_per_ep < 0 || cfg.input_n < 2 ||
+        cfg.hidden_n < 1 || cfg.motor1_n < 2 || cfg.motor2_n < 2 ||
+        cfg.psp_factor <= 0.0 || cfg.tau_trace < 1.0 ||
+        cfg.wta_k < 1 || cfg.wta_k > 64) {
+        fprintf(stderr, "Invalid config: episodes/ticks >= 1, input/motor >= 2, hidden >= 1, "
+                        "psp > 0, tau_trace >= 1, 1 <= wta-k <= 64\n");
+        return 1;
+    }
+    if (cfg.speed_mode &&
+        (cfg.step_cost < 0.0 || cfg.arrive_radius <= 0.0 ||
+         cfg.arrive_bonus < 0.0 || cfg.speed_bonus < 0.0)) {
+        fprintf(stderr, "Invalid speed config: step_cost/arrive_bonus/speed_bonus >= 0, "
+                        "arrive_radius > 0\n");
+        return 1;
+    }
+    if (cfg.speed_mode && !cfg.use_reward_baseline) {
+        fprintf(stderr, "[WARN] --no-reward-baseline 与 --speed-reward 并用时，每步成本会变成"
+                        "恒定负误差，可能持续压低权重\n");
     }
     
     h_rand = cfg.seed + 777;
     
     printf("=== Benchmark-2: 2-Joint Reaching ===\n");
-    printf("Config: in=%d h=%d m1=%d m2=%d episodes=%d ticks/ep=%d seed=%u\n",
+    printf("Config: in=%d h=%d m1=%d m2=%d episodes=%d score_horizon=%d max_ticks/ep=%d seed=%u\n",
            cfg.input_n, cfg.hidden_n, cfg.motor1_n, cfg.motor2_n,
-           cfg.episodes, cfg.ticks_per_ep, cfg.seed);
+           cfg.episodes, cfg.score_horizon, cfg.max_ticks_per_ep, cfg.seed);
     
     NetworkState2 net;
     if (net2_init(&net, cfg.input_n, cfg.hidden_n, cfg.motor1_n, cfg.motor2_n,
@@ -109,38 +211,106 @@ int main(int argc, char* argv[]) {
         fprintf(stderr, "Init failed\n");
         return 1;
     }
+    /* 把 CLI/预设参数写入运行时超参（net2_init 里是旧版默认值） */
+    net.hp.psp_factor = cfg.psp_factor;
+    net.hp.trace_clamp = cfg.trace_clamp;
+    net.hp.tau_trace = cfg.tau_trace;
+    net.hp.lambda_trace = exp(-1.0 / cfg.tau_trace);
+    net.hp.decode_mode = cfg.decode_mode;
+    net.hp.wta_k = cfg.wta_k;
+    net.hp.use_reward_baseline = cfg.use_reward_baseline;
+    printf("Mode: preset=%s psp=%.2f wta_k=%d decode=%d reward=%d baseline=%d tau=%.0f clamp=%.2f\n",
+           cfg.preset.c_str(), cfg.psp_factor, cfg.wta_k, cfg.decode_mode,
+           cfg.reward_mode, cfg.use_reward_baseline, cfg.tau_trace, cfg.trace_clamp);
+    if (cfg.speed_mode) {
+        printf("Speed: ON cost=%.4f radius=%.4f bonus=%.2f speed_bonus=%.2f\n",
+               cfg.step_cost, cfg.arrive_radius, cfg.arrive_bonus, cfg.speed_bonus);
+    }
+    
+    /* 运行时消融（与 B1 一致；编译期宏仍决定默认值） */
+    if (force_no_trace)  net.use_eligibility_trace = 0;
+    if (force_no_reward) net.use_reward_modulation = 0;
+    printf("El Trace: %d, Reward Mod: %d\n",
+           net.use_eligibility_trace, net.use_reward_modulation);
     printf("Net: %d neurons, %d synapses\n", net.neuron_count, net.synapse_count);
     
     FILE* fp = fopen(cfg.out_csv.c_str(), "w");
     if (!fp) { net2_destroy(&net); fprintf(stderr, "Cannot open %s\n", cfg.out_csv.c_str()); return 1; }
-    fprintf(fp, "episode,target_x,target_y,init_dist,final_dist,dist_ratio,final_reward\n");
+    /* 原 7 列保持不变，末尾追加耗时/到达信息，旧脚本按前 7 列读仍兼容 */
+    fprintf(fp, "episode,target_x,target_y,init_dist,final_dist,dist_ratio,final_reward,"
+                "ticks_used,arrived,arrival_tick\n");
+    
+    /* 元数据 sidecar：超参/构建信息随输出一起落盘，保证可复现 */
+    std::string meta_path = cfg.out_csv + ".meta.json";
+    FILE* mf = fopen(meta_path.c_str(), "w");
+    if (mf) {
+        std::string out_j = cfg.out_csv;
+        for (char& ch : out_j) if (ch == '\\') ch = '/';
+        fprintf(mf, "{\n");
+        fprintf(mf, "  \"benchmark\": 2,\n");
+        fprintf(mf, "  \"build\": \"%s %s\",\n", __DATE__, __TIME__);
+        fprintf(mf, "  \"out_csv\": \"%s\",\n", out_j.c_str());
+        fprintf(mf, "  \"input\": %d, \"hidden\": %d, \"motor1\": %d, \"motor2\": %d,\n",
+                cfg.input_n, cfg.hidden_n, cfg.motor1_n, cfg.motor2_n);
+        fprintf(mf, "  \"avg_conn\": %.4f, \"seed\": %u,\n", cfg.avg_conn, cfg.seed);
+        fprintf(mf, "  \"episodes\": %d, \"score_horizon\": %d, \"max_ticks_per_ep\": %d,\n",
+                cfg.episodes, cfg.score_horizon, cfg.max_ticks_per_ep);
+        fprintf(mf, "  \"target_mode\": %d, \"fixed_target\": [%.4f, %.4f],\n",
+                cfg.target_mode, cfg.fixed_tx, cfg.fixed_ty);
+        fprintf(mf, "  \"lr_schedule\": \"0.35(<500) / 0.20(<2000) / 0.04(else)\",\n");
+        fprintf(mf, "  \"weight_max\": %.4f, \"psp_factor\": %.4f,\n", WEIGHT_MAX, cfg.psp_factor);
+        fprintf(mf, "  \"preset\": \"%s\", \"decode_mode\": %d, \"wta_k\": %d, \"reward_mode\": %d,\n",
+                cfg.preset.c_str(), cfg.decode_mode, cfg.wta_k, cfg.reward_mode);
+        fprintf(mf, "  \"use_reward_baseline\": %d, \"tau_trace\": %.1f, \"trace_clamp\": %.2f,\n",
+                cfg.use_reward_baseline, cfg.tau_trace, cfg.trace_clamp);
+        fprintf(mf, "  \"el_trace\": %d, \"reward_mod\": %d,\n",
+                net.use_eligibility_trace, net.use_reward_modulation);
+        fprintf(mf, "  \"speed_mode\": %d, \"step_cost\": %.4f, \"arrive_radius\": %.4f,\n",
+                cfg.speed_mode, cfg.step_cost, cfg.arrive_radius);
+        fprintf(mf, "  \"arrive_bonus\": %.2f, \"speed_bonus\": %.2f,\n",
+                cfg.arrive_bonus, cfg.speed_bonus);
+        fprintf(mf, "  \"neurons\": %d, \"synapses\": %d\n", net.neuron_count, net.synapse_count);
+        fprintf(mf, "}\n");
+        fclose(mf);
+    }
     
     /* 存储所有最终距离用于中位数统计 */
     std::vector<double> final_dists;
     std::vector<double> init_dists;
+    std::vector<int> used_ticks;
+    std::vector<int> arrived_flags;
+    std::vector<int> arrival_ticks;
     
     for (int ep = 0; ep < cfg.episodes; ep++) {
         double tx, ty;
-        double L1, L2;
-        g_ep_for_target = ep;
-        gen_target(&tx, &ty);
+        gen_target(cfg, ep, &tx, &ty);
         net2_set_target(&net, tx, ty);
         
-        /* 重置关节到初始位置 + EMA 平滑状态 */
+        /* 重置关节到初始位置 + EMA 平滑状态（含角速度/奖励/最大伸展） */
         net.arm.theta1 = 0.0;
         net.arm.theta2 = 0.0;
+        net.arm.omega1 = 0.0;
+        net.arm.omega2 = 0.0;
         net.arm.end_x = ARM_L1 + ARM_L2;
         net.arm.end_y = 0.0;
+        net.arm.max_reach = ARM_L1 + ARM_L2;
+        net.arm.reward = 1.0;
         net2_reset_ema();
         
         double init_dist = sqrt((net.arm.end_x - tx)*(net.arm.end_x - tx) +
                                 (net.arm.end_y - ty)*(net.arm.end_y - ty));
+        if (init_dist < 1e-6) {
+            fprintf(stderr, "[WARN] episode %d: init_dist=%.6g, dist_ratio will be unstable\n",
+                    ep, init_dist);
+        }
         init_dists.push_back(init_dist);
         
-        /* lr 三段衰减：提前降 lr —— 权重早学好，高 lr 塑性噪声反而拖累解码 */
-        if (ep < 50)       net.hp.learning_rate = 0.25;
-        else if (ep < 120) net.hp.learning_rate = 0.12;
-        else               net.hp.learning_rate = 0.06;
+        /* lr 阶梯：延长高 lr 到 Ep 2000，去掉中间档
+         * v10 分析: Ep 600-999 lr=0.20 时 best=0.46, Ep 1000 lr 降到 0.08 反弹到 0.60
+         * → lr=0.20 是稳定学习的最优区间，不要降到 0.08！ */
+        if (ep < 500)       net.hp.learning_rate = 0.35;
+        else if (ep < 2000) net.hp.learning_rate = 0.20;
+        else                net.hp.learning_rate = 0.04;
         
         /* 重置神经元膜电位（除了输入层被目标激活） */
         for (int i = 0; i < net.neuron_count; i++) {
@@ -155,30 +325,95 @@ int main(int argc, char* argv[]) {
         net.queue_head = 0;
         net.queue_tail = 0;
         
-        /* 纯回合结果奖励（episodic REINFORCE）：
-         * 不用任何 IK 参考——20 轮实验证明每 tick 指令型奖励教不出反馈策略。
-         * 每 episode 结束按 r=(init-final)/init 一次性注入，trace τ≈500tick
-         * 自然覆盖接近/停留阶段；直接优化验收指标 final_dist 本身。 */
-        for (int t = 0; t < cfg.ticks_per_ep; t++) {
+        /* combo1 reward: 0.5*cosine + 0.5*delta(gain=100) — 旧版最好配置 */
+        double prev_ex = net.arm.end_x, prev_ey = net.arm.end_y;
+        bool arrived = false;          /* 首次到达后不再重复发 bonus，避免刷分 */
+        int arrival_tick = -1;         /* -1 = 本轮未到达 */
+        int ticks_used = 0;
+        /* 到达是唯一的正常结束条件；安全阀只用于避免永远到不了目标 */
+        int ep_limit = cfg.speed_mode ? cfg.max_ticks_per_ep : cfg.score_horizon;
+        for (int t = 0; ep_limit <= 0 || t < ep_limit; t++) {
             net2_tick(&net);
-        }
-        {
-            double fd = sqrt((net.arm.end_x - tx)*(net.arm.end_x - tx) +
-                             (net.arm.end_y - ty)*(net.arm.end_y - ty));
-            double r_ep = (init_dist - fd) / init_dist;   /* 相对改进 ∈ (-∞,1] */
-            net2_inject_reward2(&net, r_ep, r_ep, 0);
+            
+            double cur_ex = net.arm.end_x, cur_ey = net.arm.end_y;
+            double vx = cur_ex - prev_ex, vy = cur_ey - prev_ey;
+            double tx = net.arm.target_x - cur_ex, ty = net.arm.target_y - cur_ey;
+            
+            double vmag = sqrt(vx*vx + vy*vy);
+            double tmag = sqrt(tx*tx + ty*ty);
+            
+            /* cosine alignment */
+            double cos_r = 0.0;
+            if (vmag > 1e-6 && tmag > 1e-6) {
+                cos_r = (vx*tx + vy*ty) / (vmag * tmag);
+            }
+            
+            /* combo1: 0.5*cosine + 0.5*delta(gain=100) */
+            double prev_d = sqrt((net.arm.target_x - prev_ex)*(net.arm.target_x - prev_ex) +
+                                 (net.arm.target_y - prev_ey)*(net.arm.target_y - prev_ey));
+            double cur_d = tmag;
+            double delta_imp = (prev_d - cur_d) * 100.0;
+            if (delta_imp > 1.0) delta_imp = 1.0;
+            if (delta_imp < -1.0) delta_imp = -1.0;
+            
+            double r;
+            if (cfg.reward_mode == 1) {
+                /* 势能奖励：越靠近目标越强；配合 --no-reward-baseline 保留长期梯度 */
+                double denom = init_dist > 1e-6 ? init_dist : 1e-6;
+                r = 1.0 - tmag / denom;
+            } else {
+                r = 0.5 * cos_r + 0.5 * delta_imp;
+            }
+            /* 时间/步数维度：每步成本 + 首次到达奖励（越快到达，剩余步数越多，奖励越高） */
+            bool just_arrived = false;
+            if (cfg.speed_mode) {
+                r -= cfg.step_cost;
+                if (!arrived && tmag <= cfg.arrive_radius) {
+                    arrived = true;
+                    just_arrived = true;
+                    arrival_tick = t;
+                    double remain = (double)(cfg.score_horizon - 1 - t) /
+                                    (double)cfg.score_horizon;
+                    if (remain < 0.0) remain = 0.0;   /* 超过参考步数只是速度项为 0 */
+                    r += cfg.arrive_bonus + cfg.speed_bonus * remain;
+                }
+            }
+            net2_inject_reward(&net, r, 0);
+            ticks_used = t + 1;
+
+            /* 碰到目标即结束本轮：先多跑 1 tick 消费刚注入的 bonus（reward 队列
+             * 在下一 tick 开头才处理），否则下个 episode 开头 queue 清零会丢掉奖励。 */
+            if (cfg.speed_mode && just_arrived) {
+                net2_tick(&net);   /* 先消费刚注入的奖励，再进入下一轮 */
+                break;
+            }
+            
+            prev_ex = cur_ex; prev_ey = cur_ey;
         }
         
         double final_dist = sqrt((net.arm.end_x - tx)*(net.arm.end_x - tx) +
                                  (net.arm.end_y - ty)*(net.arm.end_y - ty));
         final_dists.push_back(final_dist);
-        double ratio = final_dist / init_dist;
+        used_ticks.push_back(ticks_used);
+        arrived_flags.push_back(arrived ? 1 : 0);
+        arrival_ticks.push_back(arrival_tick);
+        double safe_init = init_dist > 1e-6 ? init_dist : 1e-6;
+        double ratio = final_dist / safe_init;
         
-        fprintf(fp, "%d,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f\n",
-                ep, tx, ty, init_dist, final_dist, ratio, net.arm.reward);
+        if (fprintf(fp, "%d,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%d,%d,%d\n",
+                    ep, tx, ty, init_dist, final_dist, ratio, net.arm.reward,
+                    ticks_used, arrived ? 1 : 0, arrival_tick) < 0) {
+            fprintf(stderr, "Failed to write %s\n", cfg.out_csv.c_str());
+            fclose(fp);
+            net2_destroy(&net);
+            return 1;
+        }
+        fflush(fp);  /* 进程被中断时也尽量保住已完成的 episode */
         
-        printf("  Ep %2d | target=(%.2f,%.2f) | init=%.3f final=%.3f ratio=%.3f reward=%.3f\n",
-               ep, tx, ty, init_dist, final_dist, ratio, net.arm.reward);
+        printf("  Ep %2d | target=(%.2f,%.2f) | init=%.3f final=%.3f ratio=%.3f reward=%.3f"
+               " | ticks=%d arrived=%d | th1=%.3f th2=%.3f\n",
+               ep, tx, ty, init_dist, final_dist, ratio, net.arm.reward,
+               ticks_used, arrived ? 1 : 0, net.arm.theta1, net.arm.theta2);
         
         /* 诊断：每 50ep 打印 INPUT→MOTOR 权重统计 */
         if (ep % 50 == 49) {
@@ -190,7 +425,8 @@ int main(int argc, char* argv[]) {
                 if (pr < net.input_count && po >= m1b) {  /* INPUT→MOTOR 直连 */
                     double w = net.synapses[si].weight;
                     wsum += w; if (w<wmin) wmin=w; if (w>wmax) wmax=w; n++;
-                    if (w > 4.9) sat_hi++; if (w < 0.01) sat_lo++;
+                    if (w > 4.9) sat_hi++;
+                    if (w < 0.01) sat_lo++;
                 }
             }
             printf("    [wstats] I->M n=%d mean=%.3f min=%.3f max=%.3f satHI=%d satLO=%d\n",
@@ -203,10 +439,13 @@ int main(int argc, char* argv[]) {
     /* 统计 */
     std::vector<double> ratios;
     for (size_t i = 0; i < final_dists.size(); i++) {
-        ratios.push_back(final_dists[i] / init_dists[i]);
+        double d = init_dists[i] > 1e-6 ? init_dists[i] : 1e-6;
+        ratios.push_back(final_dists[i] / d);
     }
     std::sort(ratios.begin(), ratios.end());
-    double median_ratio = ratios[ratios.size() / 2];
+    size_t mid = ratios.size() / 2;
+    double median_ratio = (ratios.size() % 2) ? ratios[mid]
+                                              : (ratios[mid - 1] + ratios[mid]) / 2.0;
     double mean_ratio = 0;
     for (auto r : ratios) mean_ratio += r;
     mean_ratio /= (double)ratios.size();
@@ -225,6 +464,22 @@ int main(int argc, char* argv[]) {
         printf("[PASS] Median ratio %.4f <= 0.20\n", median_ratio);
     } else {
         printf("[FAIL] Median ratio %.4f > 0.20\n", median_ratio);
+    }
+
+    if (cfg.speed_mode) {
+        int n_arrived = 0, sum_used = 0, sum_arrival = 0;
+        for (size_t i = 0; i < used_ticks.size(); i++) {
+            sum_used += used_ticks[i];
+            if (arrived_flags[i]) { n_arrived++; sum_arrival += arrival_ticks[i]; }
+        }
+        printf("\n=== SPEED / STEP STATS ===\n");
+        printf("  Arrived:    %d/%d (%.1f%%)\n", n_arrived, cfg.episodes,
+               100.0 * n_arrived / cfg.episodes);
+        printf("  Mean ticks: %.1f\n", (double)sum_used / cfg.episodes);
+        if (n_arrived) {
+            printf("  Mean arrival tick: %.1f (smaller = faster)\n",
+                   (double)sum_arrival / n_arrived);
+        }
     }
     
     net2_destroy(&net);

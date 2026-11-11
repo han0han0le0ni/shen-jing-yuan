@@ -16,6 +16,11 @@
 #include <string.h>
 #include <math.h>
 
+/* MSVC 默认不提供 M_PI；这里兜底定义，保证跨编译器可用 */
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+
 /* ============================================================
  * 消融开关（与 B1 相同）
  * ============================================================ */
@@ -31,7 +36,7 @@
  * ============================================================ */
 #define QUEUE_SIZE          8192
 #define WEIGHT_MIN          0.001
-#define WEIGHT_MAX          5.0
+#define WEIGHT_MAX          10.0
 #define MEMBRANE_REST       -65.0
 #define SPIKE_THRESHOLD     -55.0
 #define MEMBRANE_DECAY      0.95
@@ -48,7 +53,7 @@
 #define ARM_DT              0.02    /* 物理模拟时间步长（减小防止飞远） */
 
 /* 群体编码参数 */
-#define ENCODE_SIGMA_POS    1.5
+#define ENCODE_SIGMA_POS    2.0
 #define DECODE_SIGMA_VEL    0.25    /* 速度解码高斯 sigma */
 #define ENCODE_SIGMA_PROP   0.6     /* 本体感觉角度编码 sigma (rad) */
 #define PROP_N              56      /* 12×θ1 + 12×θ2 + 16×ψ1 + 16×ψ2 (段位方位角特征) */
@@ -115,6 +120,12 @@ typedef struct {
     double learning_rate;
     double weight_decay_lambda;
     int    reward_baseline_window;
+    /* 运行时可调（默认值与旧版完全一致，保证历史实验可比） */
+    double psp_factor;             /* 突触电流增益，默认 25.0 */
+    double trace_clamp;            /* 资格迹截断幅度，默认 1.0；<=0 表示不截断 */
+    int    decode_mode;            /* 0=WTA-K 均值(默认), 2=按 winner 膜电位加权 */
+    int    wta_k;                  /* MOTOR 层 winner 数，默认 3 */
+    int    use_reward_baseline;    /* 1=减滑动基线(默认), 0=使用原始奖励误差 */
 } HyperParams2;
 
 /* ============================================================
@@ -146,6 +157,7 @@ typedef struct {
     
     Synapse2* synapses;
     int synapse_count;
+    int synapse_capacity;   /* 已分配槽位数；写入前必须检查/扩容 */
     
     RewardEvent2 reward_queue[QUEUE_SIZE];
     int queue_head;
@@ -177,6 +189,11 @@ int  net2_init(NetworkState2* net, int input_n, int hidden_n,
                unsigned int seed);
 void net2_destroy(NetworkState2* net);
 
+/* 真实规模查询：VIS/ctypes 调用者必须用这两个返回值分配缓冲区。
+ * 不可用 input+hidden+motor1+motor2 估算：input_count 已包含 PROP_N 个本体感觉神经元。 */
+int  net2_neuron_count(const NetworkState2* net);
+int  net2_synapse_count(const NetworkState2* net);
+
 /* 核心 tick 循环（含物理模拟） */
 void net2_tick(NetworkState2* net);
 
@@ -194,6 +211,28 @@ void arm_set_target(ArmState* arm, double tx, double ty);
 double arm_reward(const ArmState* arm);
 void net2_reset_ema(void);
 
+/* ============================================================
+ * 运行时设置 / 轮次控制（宿主与 Python 可视化共用）
+ * 调用方不应直接按内存偏移读写 NetworkState2，结构体变化会导致 ABI 错配。
+ * ============================================================ */
+/* 按名称设置运行时参数，支持的 name：
+ *   learning_rate, tau_stdp, tau_trace, stdp_a_plus, stdp_a_minus,
+ *   weight_decay_lambda, reward_baseline_window, psp_factor, trace_clamp,
+ *   decode_mode(0|2), wta_k(1..64), use_reward_baseline(0|1),
+ *   el_trace(0|1), reward_mod(0|1)
+ * 返回 0=成功，-1=未知参数或取值非法；tau_trace 会同步重算 lambda_trace，
+ * reward_baseline_window 会重新分配奖励历史缓冲。 */
+int    net2_set_param(NetworkState2* net, const char* name, double value);
+double net2_get_param(const NetworkState2* net, const char* name);
+
+/* 一轮结束后重置：关节/神经元状态/奖励队列归位，保留资格迹与奖励基线，
+ * 并把新目标写入群体编码（不重建网络，权重保持已学到的结果）。 */
+void   net2_episode_reset(NetworkState2* net, double tx, double ty);
+
+/* 轻量臂状态（10 个 double，布局与 net2_get_snapshot 的 arm_state 相同），
+ * 供训练循环逐 tick 读取末端位置，避免每 tick 复制整个神经元快照。 */
+void   net2_get_arm(const NetworkState2* net, double* arm_state);
+
 /* 诊断 */
 void net2_dump_stats(NetworkState2* net, FILE* fp);
 
@@ -203,12 +242,11 @@ void net2_dump_stats(NetworkState2* net, FILE* fp);
  * ============================================================ */
 
 /* 拓扑快照（一次性）：
- * out_neurons_buf: int[neuron_count * 4]
- *   每个神经元: [type, pref_id, spike_flag(布局用), reserved]
- * out_synapses_buf: int[synapse_count * 3] + double[synapse_count * 1]
- *   每个突触: [pre_id, post_id] + [weight]
- * 函数返回需要的大小（不够则返回负值要求调用者扩容）
- */
+ * 调用前先用 net2_neuron_count()/net2_synapse_count() 分配缓冲区：
+ *   int[neuron_count] ×4（types + pref_x/pref_y/pref_omega 各 double[neuron_count]）
+ *   int[synapse_count] ×2 + double[synapse_count]（pre/post/weight）
+ * C 侧不检查缓冲区大小，调用者分配不足会造成越界写。
+ * 返回 0 成功；net 为空返回 -1。 */
 int net2_get_topology(NetworkState2* net,
                       int* neuron_types, double* neuron_pref_x, double* neuron_pref_y, double* neuron_pref_omega,
                       int* syn_pre, int* syn_post, double* syn_weight);
@@ -217,6 +255,8 @@ int net2_get_topology(NetworkState2* net,
  * out_neurons_buf: double[neuron_count * 3] → [membrane, is_spiking(0/1), last_spike_tick]
  * out_arm_buf: double[10] → [theta1, theta2, omega1, omega2, end_x, end_y, target_x, target_y, reward, max_reach]
  * out_meta_buf: int[3] → [current_tick, reward_queue_head, reward_queue_tail]
+ * 注意：3 个神经元数组长度必须取 net2_neuron_count()（含 PROP_N），
+ *       C 侧不检查长度，少分配会造成越界写。
  */
 void net2_get_snapshot(NetworkState2* net,
                        double* neuron_membrane, double* neuron_spiking, double* neuron_last_spike,
