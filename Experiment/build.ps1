@@ -32,7 +32,7 @@ if ($Backup) {
     $stamp = Get-Date -Format 'yyyyMMdd_HHmmss'
     $bak = Join-Path $Root "backup_$stamp"
     New-Item -ItemType Directory -Force -Path $bak | Out-Null
-    foreach ($f in @('benchmark1.exe', 'benchmark2.exe', 'b2_core.dll', 'b2_core.o', 'b1_probe.dll', 'b1_sym.dll')) {
+    foreach ($f in @('benchmark1.exe', 'benchmark2.exe', 'b2_core.dll', 'b2_core.o', 'b1_probe.dll', 'b1_sym.dll', 'b1_t1.dll')) {
         $src = Join-Path $Root $f
         if (Test-Path $src) { Copy-Item $src (Join-Path $bak $f) -Force }
     }
@@ -63,6 +63,14 @@ Invoke-Step 'B1 sym DLL (T1 symmetric readout)' 'gcc' ($CFlags + @(
     (Join-Path $ObjDir 'b1_core.o'), (Join-Path $ObjDir 'seed_bundle.o'),
     '-o', (Join-Path $Root 'b1_sym.dll'), '-lm'))
 
+# T1 两必要条件析因实验台（判据 v1.4 §6.4 下一步）。同样只链接既有目标文件，
+# 核心源码零改动；独立 DLL 可单独删除，不影响 benchmark1.exe 与前述证据链。
+Invoke-Step 'B1 t1 DLL (T1 two-conditions factorial)' 'gcc' ($CFlags + @(
+    '-I', (Join-Path $Root 'core'), '-I', (Join-Path $Root 'brain'),
+    '-shared', (Join-Path $Root 'brain\benchmark1_t1.c'),
+    (Join-Path $ObjDir 'b1_core.o'), (Join-Path $ObjDir 'seed_bundle.o'),
+    '-o', (Join-Path $Root 'b1_t1.dll'), '-lm'))
+
 Invoke-Step 'B2 core (C)' 'gcc' ($CFlags + @('-c', (Join-Path $Root 'brain_b2\benchmark2_core.c'), '-o', (Join-Path $ObjDir 'b2_core.o')))
 Invoke-Step 'B2 host (C++)' 'g++' ($CxxFlags + @('-c', (Join-Path $Root 'host_b2\benchmark2_host.cpp'), '-o', (Join-Path $ObjDir 'b2_host.o')))
 Invoke-Step 'B2 link' 'g++' @((Join-Path $ObjDir 'b2_core.o'), (Join-Path $ObjDir 'b2_host.o'), '-o', (Join-Path $Root 'benchmark2.exe'), '-lm')
@@ -74,7 +82,7 @@ Copy-Item (Join-Path $Root 'b2_core.dll') (Join-Path $ProbeDir 'b2_core_audit.dl
 
 $sourceFiles = @(
     'brain\benchmark1_core.c', 'brain\benchmark1_core.h', 'host\benchmark1_host.cpp',
-    'brain\benchmark1_probe.c', 'brain\benchmark1_sym.c',
+    'brain\benchmark1_probe.c', 'brain\benchmark1_sym.c', 'brain\benchmark1_t1.c',
     'core\seed_bundle.c', 'core\seed_bundle.h',
     'brain_b2\benchmark2_core.c', 'brain_b2\benchmark2_core.h', 'host_b2\benchmark2_host.cpp'
 )
@@ -83,7 +91,7 @@ foreach ($rel in $sourceFiles) {
     $sourceHashes[$rel] = (Get-FileHash (Join-Path $Root $rel) -Algorithm SHA256).Hash.ToLower()
 }
 $artifactHashes = @{}
-foreach ($name in @('benchmark1.exe', 'benchmark2.exe', 'b2_core.dll', 'b2_core.o', 'b1_probe.dll', 'b1_sym.dll')) {
+foreach ($name in @('benchmark1.exe', 'benchmark2.exe', 'b2_core.dll', 'b2_core.o', 'b1_probe.dll', 'b1_sym.dll', 'b1_t1.dll')) {
     $artifactHashes[$name] = (Get-FileHash (Join-Path $Root $name) -Algorithm SHA256).Hash.ToLower()
 }
 $buildInfo = [ordered]@{
@@ -97,6 +105,7 @@ $buildInfo = [ordered]@{
         'g++ <core>.o <host>.o <obj>/seed_bundle.o -o <exe> -lm',
         'gcc -O2 -Wall -Wextra -I core -I brain -shared brain/benchmark1_probe.c <obj>/b1_core.o <obj>/seed_bundle.o -o b1_probe.dll -lm',
         'gcc -O2 -Wall -Wextra -I core -I brain -shared brain/benchmark1_sym.c <obj>/b1_core.o <obj>/seed_bundle.o -o b1_sym.dll -lm',
+        'gcc -O2 -Wall -Wextra -I core -I brain -shared brain/benchmark1_t1.c <obj>/b1_core.o <obj>/seed_bundle.o -o b1_t1.dll -lm',
         'gcc -O2 -Wall -Wextra -shared brain_b2/benchmark2_core.c -o b2_core.dll -lm'
     )
     sources = $sourceHashes
@@ -120,5 +129,5 @@ if ($Smoke) {
 }
 
 Write-Host "`nBuild OK. Artifacts:" -ForegroundColor Green
-Get-ChildItem (Join-Path $Root 'benchmark1.exe'), (Join-Path $Root 'benchmark2.exe'), (Join-Path $Root 'b2_core.dll'), (Join-Path $Root 'b1_probe.dll'), (Join-Path $Root 'b1_sym.dll') |
+Get-ChildItem (Join-Path $Root 'benchmark1.exe'), (Join-Path $Root 'benchmark2.exe'), (Join-Path $Root 'b2_core.dll'), (Join-Path $Root 'b1_probe.dll'), (Join-Path $Root 'b1_sym.dll'), (Join-Path $Root 'b1_t1.dll') |
     Select-Object Name, Length, LastWriteTime | Format-Table -AutoSize
