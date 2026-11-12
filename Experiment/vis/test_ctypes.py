@@ -5,6 +5,11 @@
 import ctypes
 import json
 import os
+import sys
+
+# Windows 控制台默认 GBK，脚本里的 ✓/✗ 会触发 UnicodeEncodeError
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 ROOT = os.path.dirname(os.path.abspath(__file__)) + "/.."
 os.chdir(ROOT)
