@@ -16,6 +16,7 @@
 /* C ABI 绑定 */
 extern "C" {
 #include "../brain/benchmark1_core.h"
+#include "../core/seed_bundle.h"
 }
 
 /* ============================================================
@@ -38,6 +39,11 @@ struct BenchmarkConfig {
     double wrong_punish   = -1.0; /* 错误惩罚值 */
     
     unsigned int seed  = 12345;  /* 随机种子 */
+    uint64_t trial_order_seed = 0; /* 非 0：只覆盖试次顺序流（单变量诊断） */
+    uint64_t structure_seed   = 0; /* 非 0：只覆盖结构流（连接拓扑） */
+    uint64_t weight_seed      = 0; /* 非 0：只覆盖权重流（初始权重） */
+    uint64_t noise_seed       = 0; /* 非 0：只覆盖噪声流 */
+    bool legacy_rng = false;       /* 逐位复现旧单流权重 + 旧 LCG 刺激序列 */
 };
 
 /* ============================================================
@@ -62,6 +68,11 @@ void print_usage(const char* prog) {
     printf("  --learning-rate X  Override reward-modulated learning rate\n");
     printf("  --disable_trace     Disable eligibility trace (ablation)\n");
     printf("  --disable_reward    Disable reward modulation (ablation)\n");
+    printf("  --trial-order-seed N  Override ONLY the trial_order stream (single-variable probe)\n");
+    printf("  --structure-seed N    Override ONLY the structure stream (connectivity)\n");
+    printf("  --weight-seed N       Override ONLY the weight stream (initial weights)\n");
+    printf("  --noise-seed N        Override ONLY the noise stream\n");
+    printf("  --legacy-rng        Reproduce pre-M0 single-stream RNG + LCG trial order\n");
     printf("  --diag FILE         Weight/trace diagnostic log path\n");
 }
 
@@ -116,6 +127,19 @@ int main(int argc, char* argv[]) {
         else if (arg == "--credit-winner") credit_winner_only = true;
         else if (arg == "--disable_trace") force_no_trace = true;
         else if (arg == "--disable_reward") force_no_reward = true;
+        else if (arg == "--trial-order-seed") {
+            if (i+1 < argc) cfg.trial_order_seed = strtoull(argv[++i], nullptr, 10);
+        }
+        else if (arg == "--structure-seed") {
+            if (i+1 < argc) cfg.structure_seed = strtoull(argv[++i], nullptr, 10);
+        }
+        else if (arg == "--weight-seed") {
+            if (i+1 < argc) cfg.weight_seed = strtoull(argv[++i], nullptr, 10);
+        }
+        else if (arg == "--noise-seed") {
+            if (i+1 < argc) cfg.noise_seed = strtoull(argv[++i], nullptr, 10);
+        }
+        else if (arg == "--legacy-rng") cfg.legacy_rng = true;
     }
     
     if (cfg.trials < 2 || cfg.delay_ticks < 0 || cfg.sensory_a < 1 ||
@@ -136,6 +160,30 @@ int main(int argc, char* argv[]) {
            learning_rate_override > 0 ? learning_rate_override : 0.005,
            learning_rate_override > 0 ? " (override)" : "");
     
+    /* M0 seed_bundle：core 消费 structure/weight/noise，host 消费 trial_order。
+     * --legacy-rng 逐位复现旧单流权重 + 旧 LCG 刺激序列，保留历史数据证据链。 */
+    net_use_legacy_rng(cfg.legacy_rng ? 1 : 0);
+    NeuroSeedBundle bundle;
+    neuro_seed_bundle_init(&bundle, (uint64_t)cfg.seed);
+    if (cfg.trial_order_seed != 0) bundle.trial_order = cfg.trial_order_seed;
+    if (cfg.structure_seed != 0) {
+        net_override_seed_stream(NEURO_STREAM_STRUCTURE, cfg.structure_seed);
+        bundle.structure = cfg.structure_seed;
+    }
+    if (cfg.weight_seed != 0) {
+        net_override_seed_stream(NEURO_STREAM_WEIGHT, cfg.weight_seed);
+        bundle.weight = cfg.weight_seed;
+    }
+    if (cfg.noise_seed != 0) {
+        net_override_seed_stream(NEURO_STREAM_NOISE, cfg.noise_seed);
+        bundle.noise = cfg.noise_seed;
+    }
+    uint64_t trial_state = bundle.trial_order;
+    printf("RNG: %s | streams(struct,weight,noise,trial)=%llu,%llu,%llu,%llu\n",
+           cfg.legacy_rng ? "legacy-single-stream" : "seed_bundle",
+           (unsigned long long)bundle.structure, (unsigned long long)bundle.weight,
+           (unsigned long long)bundle.noise, (unsigned long long)bundle.trial_order);
+
     /* 初始化网络 */
     NetworkState net;
     if (net_init(&net, cfg.sensory_a, cfg.sensory_b, cfg.hidden, cfg.output_a, cfg.output_b,
@@ -160,12 +208,27 @@ int main(int argc, char* argv[]) {
     
     printf("Network initialized: %d neurons, %d synapses\n", net.neuron_count, net.synapse_count);
 
+    /* 输出层初始偏向（T1/T2 根因诊断）：只读快照，不参与任何判据计算 */
+    double bias_q[4] = {0.0, 0.0, 0.0, 0.0};
+    net_output_bias(&net, bias_q);
+    double bias_wcorrect = bias_q[0] + bias_q[3];
+    double bias_wwrong   = bias_q[1] + bias_q[2];
+    double bias_sum      = bias_wcorrect + bias_wwrong;
+    double beta_init  = bias_sum > 0.0 ? (bias_wcorrect - bias_wwrong) / bias_sum : 0.0;
+    double delta_init = (bias_q[0] + bias_q[2]) - (bias_q[1] + bias_q[3]);
+    double beta_final = 0.0, delta_final = 0.0;
+
     /* 初始化快照：稀疏化判据需要训练前的 Gini / 有效连接数基线 */
     FILE* diag_init = fopen(diag_path.c_str(), "w");
     if (diag_init) {
         fprintf(diag_init, "=== Benchmark-1 init snapshot ===\n");
-        fprintf(diag_init, "seed=%u neurons=%d synapses=%d trace_k=%d\n",
-                cfg.seed, net.neuron_count, net.synapse_count, net.hp.trace_k);
+        fprintf(diag_init, "seed=%u neurons=%d synapses=%d trace_k=%d rng=%s\n",
+                cfg.seed, net.neuron_count, net.synapse_count, net.hp.trace_k,
+                cfg.legacy_rng ? "legacy" : "seed_bundle");
+        fprintf(diag_init,
+                "output_bias leftA=%.6f leftB=%.6f rightA=%.6f rightB=%.6f "
+                "beta=%.6f delta_out=%.6f\n",
+                bias_q[0], bias_q[1], bias_q[2], bias_q[3], beta_init, delta_init);
         net_dump_weight_stats(&net, diag_init);
         fclose(diag_init);
     }
@@ -217,7 +280,18 @@ int main(int argc, char* argv[]) {
             for (char& ch : jpath) if (ch == '\\') ch = '/';
             fprintf(mf, "  \"jsonl\": \"%s\",\n", jpath.c_str());
         }
-        fprintf(mf, "  \"neurons\": %d, \"synapses\": %d\n", net.neuron_count, net.synapse_count);
+        fprintf(mf, "  \"neurons\": %d, \"synapses\": %d,\n", net.neuron_count, net.synapse_count);
+        fprintf(mf, "  \"rng_mode\": \"%s\",\n", cfg.legacy_rng ? "legacy" : "seed_bundle");
+        fprintf(mf, "  \"seed_bundle\": {\"structure\": %llu, \"weight\": %llu, "
+                    "\"noise\": %llu, \"trial_order\": %llu},\n",
+                (unsigned long long)bundle.structure, (unsigned long long)bundle.weight,
+                (unsigned long long)bundle.noise, (unsigned long long)bundle.trial_order);
+        fprintf(mf, "  \"trial_order_override\": %llu,\n",
+                (unsigned long long)cfg.trial_order_seed);
+        fprintf(mf, "  \"judgments_version\": \"v1.2\",\n");
+        fprintf(mf, "  \"output_bias\": {\"beta_init\": %.6f, \"delta_init\": %.6f, "
+                    "\"w_correct_init\": %.6f, \"w_wrong_init\": %.6f}\n",
+                beta_init, delta_init, bias_wcorrect, bias_wwrong);
         fprintf(mf, "}\n");
         fclose(mf);
     }
@@ -227,13 +301,18 @@ int main(int argc, char* argv[]) {
     int train_correct = 0, test_correct = 0;
     int train_total = cfg.trials / 2, test_total = cfg.trials - cfg.trials / 2;
     
-    /* 试次循环 */
+    /* 试次循环：刺激顺序只消费 trial_order 流，与结构/权重/噪声互不干扰。
+     * --legacy-rng 回退到旧 LCG，保证历史 seed 逐位复现。 */
     unsigned int trial_seed = cfg.seed + 999;
     for (int trial = 0; trial < cfg.trials; trial++) {
-        /* 生成刺激类型：0=A, 1=B */
-        trial_seed = trial_seed * 1103515245 + 12345;
-        unsigned int stim_rand = (trial_seed >> 16) & 0x7FFF;
-        int stimulus_type = (stim_rand % 2 == 0) ? 0 : 1; /* 0=A, 1=B */
+        int stimulus_type;
+        if (cfg.legacy_rng) {
+            trial_seed = trial_seed * 1103515245 + 12345;
+            unsigned int stim_rand = (trial_seed >> 16) & 0x7FFF;
+            stimulus_type = (stim_rand % 2 == 0) ? 0 : 1; /* 0=A, 1=B */
+        } else {
+            stimulus_type = (int)(neuro_splitmix64(&trial_state) >> 63);
+        }
         
         int ticks_in_trial = 0;
         
@@ -357,6 +436,15 @@ int main(int argc, char* argv[]) {
     
     fclose(fp);
 
+    /* 训练后输出层偏向：与 init 对照，判断延迟信用分配是否真的改变了映射 */
+    double bias_qf[4] = {0.0, 0.0, 0.0, 0.0};
+    net_output_bias(&net, bias_qf);
+    double bias_wcorrect_f = bias_qf[0] + bias_qf[3];
+    double bias_wwrong_f   = bias_qf[1] + bias_qf[2];
+    double bias_sum_f      = bias_wcorrect_f + bias_wwrong_f;
+    beta_final  = bias_sum_f > 0.0 ? (bias_wcorrect_f - bias_wwrong_f) / bias_sum_f : 0.0;
+    delta_final = (bias_qf[0] + bias_qf[2]) - (bias_qf[1] + bias_qf[3]);
+
     /* JSONL summary：一个条件一条，便于 tools/b1_report.py 汇总 */
     if (jf) {
         fprintf(jf,
@@ -365,7 +453,10 @@ int main(int argc, char* argv[]) {
             "\"trace_k\":%d,\"tau_trace\":[%.1f,%.1f,%.1f],"
             "\"alpha\":[%.4f,%.4f,%.4f],\"lr\":%.6f,"
             "\"seed\":%u,\"neurons\":%d,\"synapses\":%d,"
-            "\"el_trace\":%d,\"reward_mod\":%d}\n",
+            "\"el_trace\":%d,\"reward_mod\":%d,"
+            "\"rng\":\"%s\",\"trial_order\":%llu,"
+            "\"beta_init\":%.6f,\"beta_final\":%.6f,"
+            "\"delta_init\":%.6f,\"delta_final\":%.6f}\n",
             tag.c_str(), cfg.trials,
             train_total > 0 ? (double)train_correct / train_total * 100.0 : 0.0,
             test_total > 0 ? (double)test_correct / test_total * 100.0 : 0.0,
@@ -373,7 +464,9 @@ int main(int argc, char* argv[]) {
             net.hp.tau_trace_k[0], net.hp.tau_trace_k[1], net.hp.tau_trace_k[2],
             net.hp.trace_alpha[0], net.hp.trace_alpha[1], net.hp.trace_alpha[2],
             net.hp.learning_rate, cfg.seed, net.neuron_count, net.synapse_count,
-            net.use_eligibility_trace, net.use_reward_modulation);
+            net.use_eligibility_trace, net.use_reward_modulation,
+            cfg.legacy_rng ? "legacy" : "bundle", (unsigned long long)bundle.trial_order,
+            beta_init, beta_final, delta_init, delta_final);
         fclose(jf);
     }
 
@@ -399,6 +492,11 @@ int main(int argc, char* argv[]) {
                 cfg.delay_ticks, cfg.trials, cfg.seed);
         fprintf(diag, "El Trace: %d, Reward Mod: %d\n",
                 net.use_eligibility_trace, net.use_reward_modulation);
+        fprintf(diag,
+                "output_bias_final leftA=%.6f leftB=%.6f rightA=%.6f rightB=%.6f "
+                "beta=%.6f delta_out=%.6f (init beta=%.6f delta=%.6f)\n",
+                bias_qf[0], bias_qf[1], bias_qf[2], bias_qf[3],
+                beta_final, delta_final, beta_init, delta_init);
         fprintf(diag, "\n");
         net_dump_weight_stats(&net, diag);
         net_dump_trace_stats(&net, diag);

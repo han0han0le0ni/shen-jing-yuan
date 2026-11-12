@@ -1,16 +1,24 @@
-=== Benchmark-1 Diagnostic Log ===
-Timestamp: Nov 12 2026 19:31:39
+=== Benchmark-1 init snapshot ===
+seed=12345 neurons=550 synapses=4000 trace_k=3 rng=legacy
+output_bias leftA=181.705297 leftB=173.978586 rightA=169.357668 rightB=182.355342 beta=0.029297 delta_out=-5.270962
+Weight stats: count=4000 mean=0.2190 min=0.0504 max=0.3999
+Weight sparsity: gini=0.1811 effective=3634.4 active=3831/4000 p10=0.1308 p50=0.2186 p90=0.3072 sat_hi=0 sat_lo=0
+
+=== Benchmark-1 final snapshot ===
+Timestamp: Nov 12 2026 23:30:33
 Config: S_A=50 S_B=50 H=400 O_A=25 O_B=25 Delay=200 Trials=300 Seed=12345
 El Trace: 1, Reward Mod: 1
+output_bias_final leftA=182.350000 leftB=174.353045 rightA=169.902302 rightB=183.659095 beta=0.030628 delta_out=-5.759838 (init beta=0.029297 delta=-5.270962)
 
-Weight stats: count=4000 mean=0.2204 min=0.0504 max=0.4114
-Trace stats: K=3 nonzero=342/4000 mean=0.1816 min=0.0153 max=0.6582
-  scale[0]: tau=20.0 alpha=0.3333 lambda=0.951229 nonzero=324 mean=0.1486
-  scale[1]: tau=100.0 alpha=0.3333 lambda=0.990050 nonzero=342 mean=0.1515
-  scale[2]: tau=500.0 alpha=0.3333 lambda=0.998002 nonzero=342 mean=0.2524
+Weight stats: count=4000 mean=0.2222 min=0.0504 max=0.4591
+Weight sparsity: gini=0.1863 effective=3610.3 active=3825/4000 p10=0.1310 p50=0.2200 p90=0.3103 sat_hi=0 sat_lo=0
+Trace stats: K=3 nonzero=336/4000 mean=0.2116 min=0.1005 max=0.6582
+  scale[0]: tau=20.0 alpha=0.3333 lambda=0.951229 nonzero=336 mean=0.1665
+  scale[1]: tau=100.0 alpha=0.3333 lambda=0.990050 nonzero=336 mean=0.1791
+  scale[2]: tau=500.0 alpha=0.3333 lambda=0.998002 nonzero=336 mean=0.2893
 
 Hyperparameters:
   tau_stdp=50.0, tau_trace=200.0, lambda_trace=0.995012
   trace_k=3, tau_k=[20.0, 100.0, 500.0], alpha=[0.3333, 0.3333, 0.3333]
-  stdp_a_plus=0.10, stdp_a_minus=0.12, lr=0.0050
+  stdp_a_plus=0.10, stdp_a_minus=0.12, lr=0.0200
   baseline_window=100

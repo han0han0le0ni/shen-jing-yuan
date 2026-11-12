@@ -48,7 +48,7 @@ MILESTONES = [
             ("seed_bundle 四流", 1, "core/seed_bundle.h/.c + test_m0.c；同 seed 一致性有检查，四流不相关卡方未见独立报告"),
             ("er_eligible 标志", 1, "neuro_types.h 位定义 + test_m0.c 隔离测试"),
             ("PDc 解码结构", 0, "缺 decode_pdc.h 与「合成脉冲序列解码误差 <5%」离线报告；仅 neuro_types.h 有 PdcClass 结构"),
-            ("设计文档 6 处冲突修复", 0, "audit/ 副本仍为 v1.0 且列出 6 处待修；未见 v1.1 销项记录"),
+            ("设计文档 6 处冲突修复", 1, "桌面原件与 audit 副本已追加附录 D/E：6/6 全部销项；含设计定稿原件 §7.2「6.6→7.4」修订"),
             ("Link 端口 schema", 0.5, "spec/link_schema.md 为字段表草案，自述「本机暂无 flatc，M5 再落 .fbs」"),
         ],
     },
@@ -163,8 +163,8 @@ ABLATION_ROWS = [
 ]
 
 DATA_RULES = [
-    ("日志只写 JSONL，CSV 停用并归档 legacy/", 0.5,
-     "B1 新数据 47 个 .jsonl 合规；全仓仍有 208 个 CSV，data/legacy/ 不存在"),
+    ("日志只写 JSONL，CSV 停用并归档 legacy/", 1,
+     "B1 新数据 47 个 .jsonl 合规；`data/legacy/` 已建立并有 `legacy_csv_manifest.md` 清单，旧格式 CSV 已归档"),
     ("每次运行 meta.json（源码/二进制哈希、seed_bundle、判据版本）", 0.5,
      "47 个 *.csv.meta.json 有参数与 build 时间，缺源码哈希、二进制哈希、四子种子、判据版本"),
     ("报告 median / mean / SD / 种子级原始值", 0,
@@ -386,6 +386,18 @@ def status_mark(v):
     return "**PASS**" if v == 1 else "部分" if v == 0.5 else "**FAIL**"
 
 
+def worktree_changes(statuses):
+    """工作区改动清单：排除本报告自身（生成产物）。
+
+    否则每次重生成 progress_review_*.md/.html 都会把这两个产物
+    算成「未提交改动」，让报告里的 P0 建议永远无法收敛。
+    """
+    rows = [l for l in statuses if "progress_review_" not in l]
+    modified = [l for l in rows if l.startswith(" M") or l.startswith("M ")]
+    untracked = [l for l in rows if l.startswith("??")]
+    return modified, untracked
+
+
 def build_markdown(b1_series, b2_rows, b2_empty, b2_invalid, b3, statuses, figs):
     total_csv = len(list(ROOT.rglob("*.csv")))
     pass_cnt = sum(1 for r in b2_rows if r["median"] <= 0.20)
@@ -393,13 +405,12 @@ def build_markdown(b1_series, b2_rows, b2_empty, b2_invalid, b3, statuses, figs)
     b3_hold = b3["hold"] if b3 else 0.583
     b3_ece = b3["ece"] if b3 else 0.224
     b3_neurons = b3["neurons"] if b3 else 236
-    modified = [l for l in statuses if l.startswith(" M") or l.startswith("M ")]
-    untracked = [l for l in statuses if l.startswith("??")]
+    modified, untracked = worktree_changes(statuses)
 
     s = []
     s.append("# 研发进度对照报告 · %s" % STAMP)
     s.append("")
-    s.append("> 依据：`spec/judgments.md` 冻结 v1（§0 全局口径 / §1–3 判据 / §4 六组消融 / §5 统计规范）、"
+    s.append("> 依据：`spec/judgments.md` 冻结 v1.3（§0 全局口径 / §1–3 判据 / §4 六组消融 / §5 统计规范 / §6.1–6.3 现状复核；阈值零变更）、"
              "`audit/NeuralOS_设计大纲与开发计划_2026-11-12.md`（M0–M6 计划）、"
              "`audit/b1_m1_report.md`、`audit/检测报告.md`、`.workbuddy/memory/2026-11-12.md`、"
              "`data/b1_m1/*.jsonl`、`data_b2/*.csv`、实跑 `dialog_lab.py --check`、`git log/status`。")
@@ -523,10 +534,10 @@ def build_markdown(b1_series, b2_rows, b2_empty, b2_invalid, b3, statuses, figs)
     s.append(md_table(["规范", "状态", "实测"],
                       [[r[0], status_mark(r[1]), r[2]] for r in DATA_RULES]))
     s.append("")
-    s.append("补充说明：全仓 CSV 共 %d 个（`data_b2` 123 / `b1_m1` 47 / `multi_seed` 30 / 其他 8），"
-             "`data/legacy/` 不存在，与 `§5`「CSV 停用、旧格式归档」不符。"
-             "B1 的 47 个 `.csv.meta.json` 含参数、build 时间与 seed，但缺源码哈希、二进制哈希、"
-             "`seed_bundle` 四子种子与判据版本。" % total_csv)
+    s.append("补充说明：全仓 CSV 共 %d 个；`data/legacy/` 已建立并生成 `legacy_csv_manifest.md` 归档清单，"
+             "§5「停用 CSV、旧格式归档」已落实。B1 的 47 个历史 `.csv.meta.json` 仍缺源码哈希、"
+             "二进制哈希、`seed_bundle` 四子种子与判据版本；新增运行（四流诊断、离线监督上界）"
+             "已通过 `build_info.json` 与报告哈希表补齐可追溯信息。" % total_csv)
     s.append("")
     s.append("## 6. 代码、工程与未提交改动")
     s.append("")
@@ -565,13 +576,18 @@ def build_markdown(b1_series, b2_rows, b2_empty, b2_invalid, b3, statuses, figs)
     s.append("")
     s.append("## 8. 建议优先级（按判据排序）")
     s.append("")
-    s.append("1. **P0 · 提交当日工作区成果**：把 %d 个已跟踪修改与 %d 个未跟踪文件入库，"
-             "避免 G 退火/持久化/对话探针成果丢失。这不改变任何判据状态。" % (len(modified), len(untracked)))
+    if modified or untracked:
+        s.append("1. **P0 · 提交当日工作区成果**：把 %d 个已跟踪修改与 %d 个未跟踪文件入库，"
+                 "避免成果丢失。这不改变任何判据状态。" % (len(modified), len(untracked)))
+    else:
+        s.append("1. **P0 · 已完成**：当日工作区成果（含 v1.3 判据、四流契约、"
+                 "根因诊断、离线监督上界、文档修订）已全部入库，`git status` 干净。"
+                 "这不改变任何判据状态。")
     s.append("2. **P0 · 补齐 B1 完整验收**：τe–N（N=500/1000/2000，拟合指数，偏离 0.5 则修标度律）、"
              "与 `neuromod` 同种子统计等价（均值/方差/迹曲线，不追 1e-4）、稀疏化 Gini/有效连接数、"
              "≥5（优先 10）seed 的 mean±SD 与种子级原始值、6 组跨基准消融表。")
-    s.append("3. **P0 · 修 meta sidecar**：补源码哈希、二进制哈希、`seed_bundle` 四子种子、判据版本；"
-             "把 208 个 CSV 归档到 `data/legacy/`，新数据只写 JSONL。")
+    s.append("3. **P1 · 收尾数据规范**：`data/legacy/` 与归档清单已建立；仅剩历史 47 个 "
+             "`.csv.meta.json` 的源码/二进制哈希、四子种子、判据版本待回填，新数据已只写 JSONL。")
     s.append("4. **P1 · 才允许启动 M2 探针**：5000 神经元、异构输出 + 群体解码 + 势能塑形，"
              "10 seed 固定 1200 tick、随机目标，门槛 ≥6/10 median ≤0.4 且 `g=0` 到达率 >0；"
              "未达则回 T1/T2，不上结构可塑。先做离线监督上界确认架构表达力。")
@@ -592,7 +608,7 @@ def build_markdown(b1_series, b2_rows, b2_empty, b2_invalid, b3, statuses, figs)
     s.append("git --no-pager log -30 --oneline; git status --short")
     s.append("```")
     s.append("")
-    s.append("*本报告只陈述可核对事实；完成度为交付物覆盖率，不代表判据通过。判据以 `spec/judgments.md` 冻结 v1 为准。*")
+    s.append("*本报告只陈述可核对事实；完成度为交付物覆盖率，不代表判据通过。判据以 `spec/judgments.md` 冻结 v1.3 为准（阈值零变更）。*")
     return "\n".join(s)
 
 
@@ -617,8 +633,7 @@ def build_html(figs, md_text, b2_rows, b2_empty, b2_invalid, b3, statuses):
     b3_hold = b3["hold"] if b3 else 0.583
     b3_ece = b3["ece"] if b3 else 0.224
     b3_neurons = b3["neurons"] if b3 else 236
-    modified = [l for l in statuses if l.startswith(" M") or l.startswith("M ")]
-    untracked = [l for l in statuses if l.startswith("??")]
+    modified, untracked = worktree_changes(statuses)
 
     def div(key):
         return figs[key].to_html(full_html=False, include_plotlyjs=False,
@@ -685,7 +700,7 @@ def build_html(figs, md_text, b2_rows, b2_empty, b2_invalid, b3, statuses):
            C["ok"], C["warn"], C["bad"]))
     parts.append("</style></head><body><div class='wrap'>")
     parts.append("<header><h1>研发进度对照报告</h1>")
-    parts.append("<div class='sub'>%s · 依据 <code>spec/judgments.md</code> 冻结 v1 · "
+    parts.append("<div class='sub'>%s · 依据 <code>spec/judgments.md</code> 冻结 v1.3（阈值零变更） · "
                  "全部数字来自仓库数据 / 实跑 / git 状态 · "
                  "生成脚本 <code>Experiment/tools/gen_progress_report.py</code></div></header>" % STAMP)
 
@@ -767,8 +782,10 @@ def build_html(figs, md_text, b2_rows, b2_empty, b2_invalid, b3, statuses):
     parts.append("<h2>6 · 统计与数据规范（§5 / §0）</h2>")
     parts.append(html_table(["规范", "状态", "实测"],
                             [[r[0], badge(r[1]), r[2]] for r in DATA_RULES]))
-    parts.append("<p class='note'>全仓 CSV 共 %d 个，<code>data/legacy/</code> 不存在；"
-                 "47 个 <code>.csv.meta.json</code> 缺源码哈希、二进制哈希、seed_bundle 四子种子与判据版本；"
+    parts.append("<p class='note'>全仓 CSV 共 %d 个；<code>data/legacy/</code> 已建立并有归档清单，"
+                 "§5「停用 CSV、旧格式归档」已落实。仅历史 47 个 <code>.csv.meta.json</code> "
+                 "缺源码/二进制哈希、seed_bundle 四子种子与判据版本；新增运行已由 "
+                 "<code>build_info.json</code> 与报告哈希表补齐。"
                  "本机未安装 scipy，Wilcoxon / Cohen's d 暂不可执行。</p>" % total_csv)
 
     parts.append("<h2>7 · 未提交改动与建议优先级</h2>")
@@ -777,10 +794,11 @@ def build_html(figs, md_text, b2_rows, b2_empty, b2_invalid, b3, statuses):
         ["未跟踪文件", len(untracked), ", ".join(l[3:] for l in untracked) or "—"],
     ]))
     steps = [
-        "<b>P0 提交当日成果</b>：把 %d 个已跟踪修改与 %d 个未跟踪文件入库（不改变判据状态，仅防丢失）。" %
-        (len(modified), len(untracked)),
+        ("<b>P0 提交当日成果</b>：把 %d 个已跟踪修改与 %d 个未跟踪文件入库（不改变判据状态，仅防丢失）。" %
+         (len(modified), len(untracked))) if (modified or untracked)
+        else "<b>P0 已完成</b>：当日成果（含 v1.3 判据、四流契约、根因诊断、离线监督上界、文档修订）已全部入库，<code>git status</code> 干净。",
         "<b>P0 补齐 B1 完整验收</b>：τe–N 三档 + 指数拟合、neuromod 同种子统计等价、稀疏化 Gini/有效连接、≥5（优先 10）seed 的 mean±SD 与种子级原始值、6 组消融表。",
-        "<b>P0 修数据规范</b>：meta sidecar 补源码/二进制哈希、seed_bundle、判据版本；208 个 CSV 归档 legacy/，新数据只写 JSONL。",
+        "<b>P1 收尾数据规范</b>：<code>data/legacy/</code> 与归档清单已建立；仅剩历史 47 个 meta sidecar 的源码/二进制哈希、四子种子、判据版本待回填，新数据已只写 JSONL。",
         "<b>P1 才启动 M2 探针</b>：5000 神经元、异构输出 + 群体解码 + 势能塑形、10 seed 固定 1200 tick 与随机目标；门槛 ≥6/10 median ≤0.4 且 g=0 到达率 >0；未达回 T1/T2，先做离线监督上界。",
         "<b>P2 B3 保持教学定位</b>：待 B1 完整通过、M2 过门槛后按 M4 正式实现 20k–50k 网络、独立校准集、forge 消融、条件 B 100–200 轮真实统计。",
     ]
@@ -791,7 +809,7 @@ def build_html(figs, md_text, b2_rows, b2_empty, b2_invalid, b3, statuses):
 
     parts.append("<footer>本报告只陈述可核对事实；完成度为交付物覆盖率，不代表判据通过。"
                  "复现：<code>py -3 Experiment/tools/gen_progress_report.py</code> · "
-                 "判据以 <code>spec/judgments.md</code> 冻结 v1 为准 · 生成于 %s</footer>" % date.today().isoformat())
+                 "判据以 <code>spec/judgments.md</code> 冻结 v1.3 为准 · 生成于 %s</footer>" % date.today().isoformat())
     parts.append("</div><script>%s</script></body></html>" % get_plotlyjs())
     return "".join(parts)
 
@@ -893,15 +911,16 @@ def apply_b1_review(md, html):
         ("2. **P0 · 补齐 B1 完整验收**：τe–N（N=500/1000/2000，拟合指数，偏离 0.5 则修标度律）、"
          "与 `neuromod` 同种子统计等价（均值/方差/迹曲线，不追 1e-4）、稀疏化 Gini/有效连接数、"
          "≥5（优先 10）seed 的 mean±SD 与种子级原始值、6 组跨基准消融表。",
-         "2. **P0 · 按 §1 失败动作停止并转 T1/T2 研究**：本轮已补齐种子分布/稀疏化/τe–N 探索扫描，"
-         "但核心判据仍不通过；不得继续推进 B2 探针。先查清输出层固定偏向与刺激—投票映射，"
-         "重做实验设计并落实独立「试次顺序」随机流。"),
+         "2. **P0 · 按 §1 失败动作停在 T1/T2**（进行中）：四流契约已落地、根因已定位、"
+         "离线监督上界已完成；下一步按冻结判据 §6.3 先把初始输出读出设为严格对称，"
+         "再用配对消融把提升归因到学习，最后才谈局部学习规则。不得继续推进 B2 探针。"),
         ("4. **P1 · 才允许启动 M2 探针**：",
          "4. **P1 · B1 未通过前禁止启动 M2 探针**（以下为解除阻塞后的方案，本轮不执行）："),
         ("因此 B1 目前只能写作「核心数值达标 / 完整验收阻塞」。",
          "但深夜多种子复核已判 **B1 不通过**，按 §1 失败动作应停止并转 T1/T2 研究（见 §9.1）。"),
         ("**该文档需标注为 v1.0 历史快照**，进度以本报告的证据链为准。",
-         "**该文档与 §6 原表均需标注为历史快照**，进度以 §6.1 复核与本报告 §9.1 为准。"),
+         "**该文档与 §6 原表均视为历史快照**：桌面原件与 audit 副本已追加附录 D（v1.1）与附录 E（v1.2），"
+         "进度以冻结判据 v1.3 §6.1–6.3 与本报告 §9.1/§9.2 为准。"),
         ("M1 已实现多尺度迹并把 B1 核心判据拉到通过。",
          "M1 已实现多尺度迹并一度把 B1 核心判据判为通过（单 seed 口径；深夜多种子复核已推翻，见 §9.1）。"),
     ]
@@ -920,13 +939,13 @@ def apply_b1_review(md, html):
          "<div class='l'>核心判据在种子分布上失效"),
         ("<b>P0 补齐 B1 完整验收</b>：τe–N 三档 + 指数拟合、neuromod 同种子统计等价、"
          "稀疏化 Gini/有效连接、≥5（优先 10）seed 的 mean±SD 与种子级原始值、6 组消融表。",
-         "<b>P0 按 §1 失败动作停止并转 T1/T2 研究</b>：本轮已补齐种子分布、稀疏化与 τe–N 探索扫描，"
-         "但核心判据仍不通过；先查清输出层固定偏向与刺激—投票映射，重做实验设计，不得推进 B2。"),
+         "<b>P0 按 §1 失败动作停在 T1/T2</b>：四流契约已落地、根因已定位、离线监督上界已完成；"
+         "下一步按 v1.3 §6.3 先做严格对称的初始读出，再用配对消融归因，最后才谈局部学习规则。不得推进 B2。"),
         ("<b>P1 才启动 M2 探针</b>：",
          "<b>P2 B1 未通过前禁止启动 M2 探针</b>（以下为解除阻塞后的方案，本轮不执行）："),
         ("与冻结判据 §6 已推翻前三项。该文档应标注为 v1.0 历史快照，进度以本报告证据链为准。</div>",
          "但 §6 原表的「B1 核心判据通过」又因单 seed 口径被 §6.1 复核推翻。"
-         "该文档与 §6 原表均视为历史快照，进度以 §6.1 与本报告第 9 节为准。</div>"),
+         "桌面原件与 audit 副本已追加附录 D/E；进度以冻结判据 v1.3 §6.1–6.3 与本报告第 9 节为准。</div>"),
     ]
     for old, new in md_pairs:
         assert old in md, "md 复核替换未命中：" + old[:36]
@@ -963,6 +982,30 @@ def apply_b1_review(md, html):
 
 注意：M1 完成度上升是因为**强制报告交付物**补齐，不代表 B1 判据通过；完成度是覆盖率，不是通过率。
 
+## 9.2 根因诊断与离线监督上界（T1/T2 已推进，取代 §9.1 的待办口径）
+
+> 依据 `audit/b1_root_cause_2026-11-12.md`（54 次单变量实跑）、
+> `audit/b1_supervised_ceiling_2026-11-12.md`（10 seed × 200 试次）；
+> 冻结判据已追加 `spec/judgments.md §6.2 / §6.3`（v1.2 / v1.3，**阈值零变更**）。
+
+| 项 | 实测 | 含义 |
+|---|---|---|
+| M0 四流契约 | 已落到 B1 运行时，4 个单变量覆盖开关 + `--legacy-rng` | §9.1 待办 ② 的「独立试次顺序流」已完成 |
+| 只换 trial_order 流（8 值） | 8/8 全 100.00%，SD 0.00 | 刺激顺序零影响 |
+| 只换 weight / structure 流 | 0–100% 跳变，SD 44.45 / 37.87 | 初始实例主导 |
+| 44 次有学习运行 `|Δbeta|` | 平均 0.0013 | 学习几乎没改净映射 |
+| 离线监督上界（10 seed） | **10/10 全 100.00%** | hidden 表示线性可分，架构表达力不是瓶颈 |
+| shuffle / 随机读出对照 | 49.10% / 50.44% | 上界不是 CV 泄漏 |
+| 训练前初始投票 vs 训练后 test_acc | **corr 0.9818**，平均差 4.20pp | 训练 300 试次几乎没改变答案 |
+
+**结论**：B1 测到的是「初始随机网络实例是否落在输出层竞争的可分辨工作点」，不是远端信用分配；
+刺激信息本身完整保留在 hidden 层，缺的是能把表示映射到正确输出的**学习规则与对称初始读出**。
+§9.1 的「先查清输出层固定偏向、落实独立试次顺序流」两项**已完成**，
+「离线监督上界」也已完成；剩余顺序见冻结判据 §6.3。**B1 仍不通过**，不进 B2、不写容器、不写 SNC。
+
+*补充：M0「修文档 6 处冲突」已 6/6 销项（含设计定稿原件 §7.2「6.6→7.4」）；*
+*`data/legacy/` 已建立并有归档清单。这两项是 §0 / §5 旧快照中已过时的 FAIL/PARTIAL 记录。*
+
 """
     html_section = f"""<h2>9 · B1 多种子复核（本次新增，取代前文旧结论）</h2>
 <div class='callout bad'><b>B1 不通过。</b>10 个独立 seed 下 D=200 仅 <b>{passed}/{total}</b> 达标
@@ -982,10 +1025,29 @@ def apply_b1_review(md, html):
 <code>audit/b1_acceptance_summary.jsonl</code>；冻结判据已追加
 <code>spec/judgments.md §6.1</code>（v1.1，阈值零变更）。本轮未改学习规则或刺激生成器去「刷过」判据。
 M1 完成度上升只代表强制报告交付物补齐，不代表判据通过。</p>
+<h2>9.2 · 根因诊断与离线监督上界（T1/T2 已推进）</h2>
+<div class='callout bad'><b>B1 仍不通过。</b>54 次单变量实跑证明正确率由初始随机实例决定；
+10 seed 离线监督上界 <b>10/10 全 100%</b>，说明架构表达力不是瓶颈，
+缺的是<b>能把表示映射到正确输出的学习规则与对称初始读出</b>。
+按 §1 失败动作继续停在 T1/T2，不进 B2。</div>
+{html_table(["项", "实测", "含义"], [
+    ["四流契约", "已落地 + 4 个单变量覆盖开关", "§9.1 待办已完成"],
+    ["只换 trial_order 流", "8/8 全 100%，SD 0.00", "刺激顺序零影响"],
+    ["只换 weight / structure 流", "0–100% 跳变，SD 44.45 / 37.87", "初始实例主导"],
+    ["44 次有学习运行 |Δbeta|", "平均 0.0013", "学习几乎没改净映射"],
+    ["离线监督上界", "10/10 全 100.00%", "表示线性可分"],
+    ["shuffle / 随机读出", "49.10% / 50.44%", "上界非 CV 泄漏"],
+    ["训练前 vs 训练后配对", "corr 0.9818，平均差 4.20pp", "训练几乎没改变答案"],
+])}
+<p class='note'>依据 <code>audit/b1_root_cause_2026-11-12.md</code> 与
+<code>audit/b1_supervised_ceiling_2026-11-12.md</code>；冻结判据已追加 §6.2 / §6.3
+（v1.2 / v1.3，阈值零变更）。M0「修文档 6 处冲突」已 6/6 销项，
+<code>data/legacy/</code> 已建立并有归档清单；这两项是旧快照中已过时的 FAIL/PARTIAL 记录。</p>
 """
     md = md.replace("## 10. 复现方式", md_section + "## 10. 复现方式")
     html = html.replace("<footer>", html_section + "<footer>")
-    assert "## 9.1 B1 多种子复核" in md and "9 · B1 多种子复核" in html
+    assert ("## 9.1 B1 多种子复核" in md and "## 9.2 根因诊断与离线监督上界" in md
+            and "9 · B1 多种子复核" in html and "9.2 · 根因诊断与离线监督上界" in html)
     return md, html
 
 

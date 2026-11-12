@@ -14,6 +14,7 @@
 #include <string.h>
 #include <math.h>
 #include <time.h>
+#include <stdint.h>
 
 /* ============================================================
  * 消融开关（编译时通过 -D 定义，默认全部启用）
@@ -174,5 +175,16 @@ double net_read_output_b_rate(NetworkState* net); /* OUTPUT_B发放率 */
 void net_dump_weight_stats(NetworkState* net, FILE* fp);
 void net_dump_trace_stats(NetworkState* net, FILE* fp);
 void net_dump_spiking_counts(NetworkState* net, FILE* fp);
+
+/* M0 seed_bundle：旧单流复现开关（仅供历史数据证据链，默认关闭） */
+void net_use_legacy_rng(int on);
+
+/* 单变量诊断：在 net_init 之前覆盖某一条流，取值 0=structure,1=weight,
+ * 2=noise,3=trial_order（与 core/seed_bundle.h 的 NeuroStream 一致）。 */
+void net_override_seed_stream(int which, uint64_t value);
+
+/* 输出层初始偏向诊断：out = [left->A, left->B, right->A, right->B] 权重和。
+ * 只读，不改变网络状态，不参与判据计算。 */
+void net_output_bias(NetworkState* net, double out[4]);
 
 #endif /* BENCHMARK1_CORE_H */

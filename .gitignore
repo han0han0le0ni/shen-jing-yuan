@@ -56,3 +56,9 @@ Experiment/data/b1_acceptance/
 
 # 旧格式 CSV 归档（判据 §5）
 Experiment/data/legacy/
+
+# B1 根因诊断原始运行数据（可复现：tools/b1_bias_diagnosis.py）
+Experiment/data/b1_bias/
+
+# B1 离线监督上界原始数据（可复现：tools/b1_supervised_ceiling.py）
+Experiment/data/b1_ceiling/

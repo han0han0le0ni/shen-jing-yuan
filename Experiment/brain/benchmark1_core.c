@@ -13,23 +13,50 @@
 #define M_PI 3.14159265358979323846
 #endif
 #include "benchmark1_core.h"
+#include "../core/seed_bundle.h"
 
 /* ============================================================
- * 工具函数：随机数（固定种子可复现）
+ * 工具函数：M0 冻结的 seed_bundle 四流（结构/权重/噪声/试次顺序）
+ *
+ * 旧实现只有一条 LCG (g_rand_state)，结构连接与初始权重共用同一流，
+ * 换 seed 时拓扑与权重同时改变，违反 §0.5「独立脑实例」与 §0.6「单变量」。
+ * 现在 B1 核心只消费 structure / weight / noise 三条；trial_order 由
+ * host 从同一个 master seed 独立派生，用于生成刺激序列。
+ *
+ * --legacy-rng 可逐位复现旧行为（结构+权重共用 LCG），保留证据链。
  * ============================================================ */
-static unsigned int g_rand_state = 12345;
+static NeuroSeedBundle g_bundle;
+static int g_legacy_rng = 0;
+static unsigned int g_legacy_state = 12345;
 
-static inline double rand_uniform(void) {
-    g_rand_state = g_rand_state * 1103515245 + 12345;
-    return (double)((g_rand_state >> 16) & 0x7FFF) / 32767.0;
+/* 单变量诊断：允许在 net_init 派生四流之后、消费之前覆盖任意一条流。
+ * 这样「只换权重、不动结构」或「只换结构、不动权重」才是真正的单变量实验。 */
+static uint64_t g_stream_override[NEURO_STREAM_COUNT];
+static int      g_stream_override_on[NEURO_STREAM_COUNT];
+
+void net_override_seed_stream(int which, uint64_t value) {
+    if (which < 0 || which >= NEURO_STREAM_COUNT) return;
+    g_stream_override[which] = value;
+    g_stream_override_on[which] = 1;
 }
 
-static inline double rand_gaussian(double mean, double std) {
-    /* Box-Muller变换 */
-    double u1 = rand_uniform();
-    double u2 = rand_uniform();
-    if (u1 < 1e-10) u1 = 1e-10;
-    return mean + std * sqrt(-2.0 * log(u1)) * cos(2.0 * M_PI * u2);
+static inline double rand_legacy(void) {
+    g_legacy_state = g_legacy_state * 1103515245 + 12345;
+    return (double)((g_legacy_state >> 16) & 0x7FFF) / 32767.0;
+}
+
+static inline double rand_struct(void) {
+    return g_legacy_rng ? rand_legacy()
+                        : neuro_rng_uniform01(&g_bundle.structure);
+}
+
+static inline double rand_weight(void) {
+    return g_legacy_rng ? rand_legacy()
+                        : neuro_rng_uniform01(&g_bundle.weight);
+}
+
+void net_use_legacy_rng(int on) {
+    g_legacy_rng = on ? 1 : 0;
 }
 
 static inline double clamp(double v, double lo, double hi) {
@@ -46,8 +73,18 @@ int net_init(NetworkState* net, int sensory_a, int sensory_b,
              double avg_conn_per_n, unsigned int seed) {
     memset(net, 0, sizeof(NetworkState));
     
-    /* 设置随机种子 */
-    g_rand_state = seed;
+    /* 设置随机种子：四流由 master seed 确定性派生；legacy 流保留旧 LCG 起点 */
+    neuro_seed_bundle_init(&g_bundle, (uint64_t)seed);
+    g_legacy_state = seed;
+    /* 覆盖必须在任何 rand_struct()/rand_weight() 调用之前生效 */
+    {
+        int s;
+        for (s = 0; s < NEURO_STREAM_COUNT; s++) {
+            if (!g_stream_override_on[s]) continue;
+            uint64_t* p = neuro_seed_stream_ptr(&g_bundle, (NeuroStream)s);
+            if (p) *p = g_stream_override[s];
+        }
+    }
     
     /* 神经元数量记录 */
     net->sensory_a_count = sensory_a;
@@ -127,22 +164,22 @@ int net_init(NetworkState* net, int sensory_a, int sensory_b,
         
         /* 连接到左半（正确路径） */
         for (int k = 0; k < left_count && net->synapse_count < est_synapses; k++) {
-            int post = hidden_base + (int)(rand_uniform() * hidden_mid);
+            int post = hidden_base + (int)(rand_struct() * hidden_mid);
             s_idx = net->synapse_count++;
             net->synapses[s_idx].pre_id = pre;
             net->synapses[s_idx].post_id = post;
-            net->synapses[s_idx].weight = 0.15 + rand_uniform() * 0.25;  /* 主路径 0.1~0.3 */
+            net->synapses[s_idx].weight = 0.15 + rand_weight() * 0.25;  /* 主路径 0.1~0.3 */
             net->synapses[s_idx].eligibility_trace = 0.0;
             net->synapses[s_idx].last_stdp_tick = 0;
         }
         /* 少量跨到右半（错误路径，供学习抑制） */
         for (int k = 0; k < right_count && net->synapse_count < est_synapses; k++) {
-            int post = hidden_base + hidden_mid + (int)(rand_uniform() * (hidden - hidden_mid));
+            int post = hidden_base + hidden_mid + (int)(rand_struct() * (hidden - hidden_mid));
             if (post >= hidden_base + hidden) continue;
             s_idx = net->synapse_count++;
             net->synapses[s_idx].pre_id = pre;
             net->synapses[s_idx].post_id = post;
-            net->synapses[s_idx].weight = 0.05 + rand_uniform() * 0.1;  /* 跨层 0.05~0.15 */
+            net->synapses[s_idx].weight = 0.05 + rand_weight() * 0.1;  /* 跨层 0.05~0.15 */
             net->synapses[s_idx].eligibility_trace = 0.0;
             net->synapses[s_idx].last_stdp_tick = 0;
         }
@@ -158,22 +195,22 @@ int net_init(NetworkState* net, int sensory_a, int sensory_b,
         
         /* 连接到右半（正确路径） */
         for (int k = 0; k < right_count && net->synapse_count < est_synapses; k++) {
-            int post = hidden_base + hidden_mid + (int)(rand_uniform() * (hidden - hidden_mid));
+            int post = hidden_base + hidden_mid + (int)(rand_struct() * (hidden - hidden_mid));
             if (post >= hidden_base + hidden) continue;
             s_idx = net->synapse_count++;
             net->synapses[s_idx].pre_id = pre;
             net->synapses[s_idx].post_id = post;
-            net->synapses[s_idx].weight = 0.15 + rand_uniform() * 0.25;
+            net->synapses[s_idx].weight = 0.15 + rand_weight() * 0.25;
             net->synapses[s_idx].eligibility_trace = 0.0;
             net->synapses[s_idx].last_stdp_tick = 0;
         }
         /* 少量跨到左半 */
         for (int k = 0; k < left_count && net->synapse_count < est_synapses; k++) {
-            int post = hidden_base + (int)(rand_uniform() * hidden_mid);
+            int post = hidden_base + (int)(rand_struct() * hidden_mid);
             s_idx = net->synapse_count++;
             net->synapses[s_idx].pre_id = pre;
             net->synapses[s_idx].post_id = post;
-            net->synapses[s_idx].weight = 0.05 + rand_uniform() * 0.1;
+            net->synapses[s_idx].weight = 0.05 + rand_weight() * 0.1;
             net->synapses[s_idx].eligibility_trace = 0.0;
             net->synapses[s_idx].last_stdp_tick = 0;
         }
@@ -186,17 +223,17 @@ int net_init(NetworkState* net, int sensory_a, int sensory_b,
         
         for (int k = 0; k < K_feedforward && net->synapse_count < est_synapses; k++) {
             int post;
-            if (rand_uniform() < 0.5) {
-                post = out_base + (int)(rand_uniform() * output_a);
+            if (rand_struct() < 0.5) {
+                post = out_base + (int)(rand_struct() * output_a);
             } else {
-                post = out_base + output_a + (int)(rand_uniform() * output_b);
+                post = out_base + output_a + (int)(rand_struct() * output_b);
             }
             if (post >= net->neuron_count) continue;
             
             s_idx = net->synapse_count++;
             net->synapses[s_idx].pre_id = pre;
             net->synapses[s_idx].post_id = post;
-            net->synapses[s_idx].weight = 0.12 + rand_uniform() * 0.2;  /* 弱权重 */
+            net->synapses[s_idx].weight = 0.12 + rand_weight() * 0.2;  /* 弱权重 */
             net->synapses[s_idx].eligibility_trace = 0.0;
             net->synapses[s_idx].last_stdp_tick = 0;
         }
@@ -209,17 +246,17 @@ int net_init(NetworkState* net, int sensory_a, int sensory_b,
         
         for (int k = 0; k < K_feedforward && net->synapse_count < est_synapses; k++) {
             int post;
-            if (rand_uniform() < 0.5) {
-                post = out_base + (int)(rand_uniform() * output_a);
+            if (rand_struct() < 0.5) {
+                post = out_base + (int)(rand_struct() * output_a);
             } else {
-                post = out_base + output_a + (int)(rand_uniform() * output_b);
+                post = out_base + output_a + (int)(rand_struct() * output_b);
             }
             if (post >= net->neuron_count) continue;
             
             s_idx = net->synapse_count++;
             net->synapses[s_idx].pre_id = pre;
             net->synapses[s_idx].post_id = post;
-            net->synapses[s_idx].weight = 0.12 + rand_uniform() * 0.2;
+            net->synapses[s_idx].weight = 0.12 + rand_weight() * 0.2;
             net->synapses[s_idx].eligibility_trace = 0.0;
             net->synapses[s_idx].last_stdp_tick = 0;
         }
@@ -737,6 +774,38 @@ double net_read_output_b_rate(NetworkState* net) {
 /* ============================================================
  * 诊断接口
  * ============================================================ */
+
+/* 输出层初始偏向诊断（T1/T2 根因研究，不参与任何判据计算）。
+ * 只统计 hidden -> output 的突触，按「隐藏左/右半」×「输出 A/B」分四类累加权重：
+ *   out[0] = left->A   out[1] = left->B
+ *   out[2] = right->A  out[3] = right->B
+ * 由此可算：
+ *   beta      = ((out0+out3) - (out1+out2)) / 总和   «刺激→正确输出»的净映射偏向
+ *   delta_out = (out0+out2) - (out1+out3)            «输出A侧 − 输出B侧»的绝对侧偏向
+ * 若 beta≈0 而 delta_out 显著非零，则投票恒定偏向一侧，正确率只由刺激序列比例决定；
+ * 若 beta 本身在不同 seed 间大幅摆动，则正确率由初始随机权重决定，而非延迟信用分配。 */
+void net_output_bias(NetworkState* net, double out[4]) {
+    int hbase = net->sensory_a_count + net->sensory_b_count;
+    int hmid  = net->hidden_count / 2;
+    int obase = hbase + net->hidden_count;
+    int oa_end = obase + net->output_a_count;
+    double acc[4] = {0.0, 0.0, 0.0, 0.0};
+    int s;
+    for (s = 0; s < net->synapse_count; s++) {
+        int pre = net->synapses[s].pre_id;
+        int post = net->synapses[s].post_id;
+        if (pre < hbase || pre >= obase || post < obase) continue;
+        int left = (pre < hbase + hmid);
+        int to_a = (post < oa_end);
+        int q = (left ? 0 : 2) + (to_a ? 0 : 1);
+        acc[q] += net->synapses[s].weight;
+    }
+    if (out) {
+        int k;
+        for (k = 0; k < 4; k++) out[k] = acc[k];
+    }
+}
+
 static int _cmp_abs_weight(const void* a, const void* b) {
     double x = *(const double*)a, y = *(const double*)b;
     return (x > y) - (x < y);
