@@ -1,6 +1,6 @@
 # 研发进度对照报告 · 2026-11-12
 
-> 依据：`spec/judgments.md` 冻结 v1（§0 全局口径 / §1–3 判据 / §4 六组消融 / §5 统计规范）、`audit/NeuralOS_设计大纲与开发计划_2026-11-12.md`（M0–M6 计划）、`audit/b1_m1_report.md`、`audit/检测报告.md`、`.workbuddy/memory/2026-11-12.md`、`data/b1_m1/*.jsonl`、`data_b2/*.csv`、实跑 `dialog_lab.py --check`、`git log/status`。
+> 依据：`spec/judgments.md` 冻结 v1.3（§0 全局口径 / §1–3 判据 / §4 六组消融 / §5 统计规范 / §6.1–6.3 现状复核；阈值零变更）、`audit/NeuralOS_设计大纲与开发计划_2026-11-12.md`（M0–M6 计划）、`audit/b1_m1_report.md`、`audit/检测报告.md`、`.workbuddy/memory/2026-11-12.md`、`data/b1_m1/*.jsonl`、`data_b2/*.csv`、实跑 `dialog_lab.py --check`、`git log/status`。
 > 生成脚本：`Experiment/tools/gen_progress_report.py`（可重复运行、全部数字来自文件或实跑）。
 
 ## 0. 一页结论
@@ -8,7 +8,7 @@
 **B1 核心判据不通过（10 seed 复核）：完整组 D=200 仅 1/10 达标，mean 21.87% / median 5.00%；B2 仍不通过；B3 正式实现仍为 0。按 §1 失败动作：停止，转 T1/T2 研究，不得进入 B2。详见 §9.1。**
 
 - 判据文件开头（`judgments.md:4`）明确：**未通过 Benchmark-1 之前，不得启动 Benchmark-2 以上开发。**`§4 跨基准强制消融` 又规定「没有消融表，通过判据不成立」。但深夜多种子复核已判 **B1 不通过**，按 §1 失败动作应停止并转 T1/T2 研究（见 §9.1）。
-- `audit/NeuralOS_设计大纲与开发计划_2026-11-12.md` 的 §2 进度表是**当天上午快照**：它写「阶段 0 接口冻结 0%、多尺度资格迹无、B1 名义通过实为无效、B2 0 PASS」。同日晚间提交 `9e7ff0c`（M0）、`d9c73c1`（M1 多尺度）与冻结判据 §6 已推翻前三项。**该文档与 §6 原表均需标注为历史快照**，进度以 §6.1 复核与本报告 §9.1 为准。
+- `audit/NeuralOS_设计大纲与开发计划_2026-11-12.md` 的 §2 进度表是**当天上午快照**：它写「阶段 0 接口冻结 0%、多尺度资格迹无、B1 名义通过实为无效、B2 0 PASS」。同日晚间提交 `9e7ff0c`（M0）、`d9c73c1`（M1 多尺度）与冻结判据 §6 已推翻前三项。**该文档与 §6 原表均视为历史快照**：桌面原件与 audit 副本已追加附录 D（v1.1）与附录 E（v1.2），进度以冻结判据 v1.3 §6.1–6.3 与本报告 §9.1/§9.2 为准。
 - 同一口径冲突需固定：`检测报告.md` 的最佳 median `0.4164` 是当时全部 104 个 CSV 的最优；`judgments.md §6` 的 `0.4398` 是 2000-episode 子集最优（`results_best_2000.csv`）。两者不可混用。
 
 ### 关键数字（全部可复算）
@@ -22,7 +22,7 @@
 | B1 6 组跨基准消融 | 4 组机制未实现，无法构造消融条件 | 6 组缺一不可 | FAIL |
 | B2 历史运行 | 120 个有效 CSV，0 个达标；最佳 0.4164 | median ≤0.20，10 seed ≥8 | FAIL |
 | B3 教学探针 1000 轮 | hold 0.583 / ECE 0.224 / 236 神经元 / 巩固 +0.000 | ≥0.70 / <0.10 / 20k–50k / >0 | FAIL（且不计入验收） |
-| 未提交改动 | 7 个已跟踪修改 + 21 个未跟踪文件 | — | 风险：当日成果未入库 |
+| 未提交改动 | 0 个已跟踪修改 + 0 个未跟踪文件 | — | 已入库，工作区干净（不含本报告产物） |
 
 ## 1. 计分口径与证据来源
 
@@ -36,7 +36,7 @@
 
 | 里程碑 | 内容 | 计划周期 | 交付物数 | DONE | PARTIAL | MISSING | 完成度 |
 |---|---|---|---|---|---|---|---|
-| M0 | 接口冻结 | 2 周 | 7 | 4 | 1 | 2 | 64% |
+| M0 | 接口冻结 | 2 周 | 7 | 5 | 1 | 1 | 79% |
 | M1 | B1 重验 | 4 周 | 10 | 6 | 1 | 3 | 65% |
 | M2 | B2 可行性探针 | 4 周 | 4 | 0 | 0 | 4 | 0% |
 | M3 | B2 完整 | 10 周 | 4 | 0 | 0 | 4 | 0% |
@@ -46,7 +46,7 @@
 
 ### 逐项明细
 
-**M0 接口冻结（64%）**
+**M0 接口冻结（79%）**
 
 | 交付物 | 状态 | 证据 / 缺口 |
 |---|---|---|
@@ -55,7 +55,7 @@
 | seed_bundle 四流 | **PASS** | core/seed_bundle.h/.c + test_m0.c；同 seed 一致性有检查，四流不相关卡方未见独立报告 |
 | er_eligible 标志 | **PASS** | neuro_types.h 位定义 + test_m0.c 隔离测试 |
 | PDc 解码结构 | **FAIL** | 缺 decode_pdc.h 与「合成脉冲序列解码误差 <5%」离线报告；仅 neuro_types.h 有 PdcClass 结构 |
-| 设计文档 6 处冲突修复 | **FAIL** | audit/ 副本仍为 v1.0 且列出 6 处待修；未见 v1.1 销项记录 |
+| 设计文档 6 处冲突修复 | **PASS** | 桌面原件与 audit 副本已追加附录 D/E：6/6 全部销项；含设计定稿原件 §7.2「6.6→7.4」修订 |
 | Link 端口 schema | 部分 | spec/link_schema.md 为字段表草案，自述「本机暂无 flatc，M5 再落 .fbs」 |
 
 **M1 B1 重验（65%）**
@@ -194,14 +194,14 @@
 
 | 规范 | 状态 | 实测 |
 |---|---|---|
-| 日志只写 JSONL，CSV 停用并归档 legacy/ | 部分 | B1 新数据 47 个 .jsonl 合规；全仓仍有 208 个 CSV，data/legacy/ 不存在 |
+| 日志只写 JSONL，CSV 停用并归档 legacy/ | **PASS** | B1 新数据 47 个 .jsonl 合规；`data/legacy/` 已建立并有 `legacy_csv_manifest.md` 清单，旧格式 CSV 已归档 |
 | 每次运行 meta.json（源码/二进制哈希、seed_bundle、判据版本） | 部分 | 47 个 *.csv.meta.json 有参数与 build 时间，缺源码哈希、二进制哈希、四子种子、判据版本 |
 | 报告 median / mean / SD / 种子级原始值 | **FAIL** | B1 全部 seed=12345；B2 旧实验无 sidecar；均无 mean±SD |
 | 失败运行保留不删除 | **PASS** | 47 组 B1 与 123 个 B2 CSV 均保留（含 1 空、4 截断） |
 | 标准中位数定义（偶数取两项均值） | **PASS** | host_b2/benchmark2_host.cpp 已实现 (ratios[mid-1]+ratios[mid])/2；历史报告仍按旧口径 |
 | 独立脑实例 / 单变量 | **PASS** | b1_sweep.ps1 每条件独立进程；但 6 档延迟共用同一 seed，无法给出种子方差 |
 
-补充说明：全仓 CSV 共 333 个（`data_b2` 123 / `b1_m1` 47 / `multi_seed` 30 / 其他 8），`data/legacy/` 不存在，与 `§5`「CSV 停用、旧格式归档」不符。B1 的 47 个 `.csv.meta.json` 含参数、build 时间与 seed，但缺源码哈希、二进制哈希、`seed_bundle` 四子种子与判据版本。
+补充说明：全仓 CSV 共 392 个；`data/legacy/` 已建立并生成 `legacy_csv_manifest.md` 归档清单，§5「停用 CSV、旧格式归档」已落实。B1 的 47 个历史 `.csv.meta.json` 仍缺源码哈希、二进制哈希、`seed_bundle` 四子种子与判据版本；新增运行（四流诊断、离线监督上界）已通过 `build_info.json` 与报告哈希表补齐可追溯信息。
 
 ## 6. 代码、工程与未提交改动
 
@@ -210,8 +210,8 @@
 
 | 类型 | 数量 | 清单 |
 |---|---|---|
-| 已跟踪修改 | 7 | .gitignore, .workbuddy/memory/2026-11-12.md, Experiment/brain/benchmark1_core.c, Experiment/host/benchmark1_host.cpp, Experiment/logs/benchmark1_diagnostic.txt, Experiment/spec/judgments.md, Experiment/vis/neuron_vis.py |
-| 未跟踪文件 | 21 | Experiment/audit/b1_acceptance_report.md, Experiment/audit/b1_acceptance_summary.jsonl, Experiment/audit/legacy_csv_manifest.md, Experiment/audit/progress_review_2026-11-12.html, Experiment/audit/progress_review_2026-11-12.md, Experiment/tools/b1_acceptance.py, Experiment/tools/gen_progress_report.py, Experiment/tools/test_dialog_lab.py, Experiment/tools/test_lmstudio.py, Experiment/tools/test_training_store.py, Experiment/vis/chat_panel.py, Experiment/vis/dialog_lab.py, Experiment/vis/guidance_monitor.py, Experiment/vis/learning_plugins/lmstudio.py, Experiment/vis/lmstudio_client.py, Experiment/vis/preview_chat.png, Experiment/vis/preview_dialog.png, Experiment/vis/preview_guidance.png, Experiment/vis/preview_training.png, Experiment/vis/training_panel.py, Experiment/vis/training_store.py |
+| 已跟踪修改 | 0 | — |
+| 未跟踪文件 | 0 | — |
 
 另有已确认的工程限制：C DLL 后端只有读权重接口、无写权重 API，训练快照必须切到 numpy/CUDA 向量化后端（`vis/training_store.py` 明确拒绝并给出提示）；本机未安装 `scipy`，B2 的 Wilcoxon / Cohen's d 检验当前无法执行。
 
@@ -227,9 +227,9 @@
 
 ## 8. 建议优先级（按判据排序）
 
-1. **P0 · 提交当日工作区成果**：把 7 个已跟踪修改与 21 个未跟踪文件入库，避免 G 退火/持久化/对话探针成果丢失。这不改变任何判据状态。
-2. **P0 · 按 §1 失败动作停止并转 T1/T2 研究**：本轮已补齐种子分布/稀疏化/τe–N 探索扫描，但核心判据仍不通过；不得继续推进 B2 探针。先查清输出层固定偏向与刺激—投票映射，重做实验设计并落实独立「试次顺序」随机流。
-3. **P0 · 修 meta sidecar**：补源码哈希、二进制哈希、`seed_bundle` 四子种子、判据版本；把 208 个 CSV 归档到 `data/legacy/`，新数据只写 JSONL。
+1. **P0 · 已完成**：当日工作区成果（含 v1.3 判据、四流契约、根因诊断、离线监督上界、文档修订）已全部入库，`git status` 干净。这不改变任何判据状态。
+2. **P0 · 按 §1 失败动作停在 T1/T2**（进行中）：四流契约已落地、根因已定位、离线监督上界已完成；下一步按冻结判据 §6.3 先把初始输出读出设为严格对称，再用配对消融把提升归因到学习，最后才谈局部学习规则。不得继续推进 B2 探针。
+3. **P1 · 收尾数据规范**：`data/legacy/` 与归档清单已建立；仅剩历史 47 个 `.csv.meta.json` 的源码/二进制哈希、四子种子、判据版本待回填，新数据已只写 JSONL。
 4. **P1 · B1 未通过前禁止启动 M2 探针**（以下为解除阻塞后的方案，本轮不执行）：5000 神经元、异构输出 + 群体解码 + 势能塑形，10 seed 固定 1200 tick、随机目标，门槛 ≥6/10 median ≤0.4 且 `g=0` 到达率 >0；未达则回 T1/T2，不上结构可塑。先做离线监督上界确认架构表达力。
 5. **P2 · B3 保持教学定位**：`dialog_lab.py` 继续标注「不计入验收」；待 B1 完整通过、M2 过门槛后按 M4 正式实现 20k–50k 网络、独立校准集、forge 消融、条件 B 100–200 轮真实延迟/失败率统计。
 
@@ -274,6 +274,30 @@
 
 注意：M1 完成度上升是因为**强制报告交付物**补齐，不代表 B1 判据通过；完成度是覆盖率，不是通过率。
 
+## 9.2 根因诊断与离线监督上界（T1/T2 已推进，取代 §9.1 的待办口径）
+
+> 依据 `audit/b1_root_cause_2026-11-12.md`（54 次单变量实跑）、
+> `audit/b1_supervised_ceiling_2026-11-12.md`（10 seed × 200 试次）；
+> 冻结判据已追加 `spec/judgments.md §6.2 / §6.3`（v1.2 / v1.3，**阈值零变更**）。
+
+| 项 | 实测 | 含义 |
+|---|---|---|
+| M0 四流契约 | 已落到 B1 运行时，4 个单变量覆盖开关 + `--legacy-rng` | §9.1 待办 ② 的「独立试次顺序流」已完成 |
+| 只换 trial_order 流（8 值） | 8/8 全 100.00%，SD 0.00 | 刺激顺序零影响 |
+| 只换 weight / structure 流 | 0–100% 跳变，SD 44.45 / 37.87 | 初始实例主导 |
+| 44 次有学习运行 `|Δbeta|` | 平均 0.0013 | 学习几乎没改净映射 |
+| 离线监督上界（10 seed） | **10/10 全 100.00%** | hidden 表示线性可分，架构表达力不是瓶颈 |
+| shuffle / 随机读出对照 | 49.10% / 50.44% | 上界不是 CV 泄漏 |
+| 训练前初始投票 vs 训练后 test_acc | **corr 0.9818**，平均差 4.20pp | 训练 300 试次几乎没改变答案 |
+
+**结论**：B1 测到的是「初始随机网络实例是否落在输出层竞争的可分辨工作点」，不是远端信用分配；
+刺激信息本身完整保留在 hidden 层，缺的是能把表示映射到正确输出的**学习规则与对称初始读出**。
+§9.1 的「先查清输出层固定偏向、落实独立试次顺序流」两项**已完成**，
+「离线监督上界」也已完成；剩余顺序见冻结判据 §6.3。**B1 仍不通过**，不进 B2、不写容器、不写 SNC。
+
+*补充：M0「修文档 6 处冲突」已 6/6 销项（含设计定稿原件 §7.2「6.6→7.4」）；*
+*`data/legacy/` 已建立并有归档清单。这两项是 §0 / §5 旧快照中已过时的 FAIL/PARTIAL 记录。*
+
 ## 10. 复现方式
 
 ```
@@ -283,4 +307,4 @@ py -3 Experiment/tools/b1_report.py               # B1 sweep 汇总
 git --no-pager log -30 --oneline; git status --short
 ```
 
-*本报告只陈述可核对事实；完成度为交付物覆盖率，不代表判据通过。判据以 `spec/judgments.md` 冻结 v1 为准。*
+*本报告只陈述可核对事实；完成度为交付物覆盖率，不代表判据通过。判据以 `spec/judgments.md` 冻结 v1.3 为准（阈值零变更）。*
