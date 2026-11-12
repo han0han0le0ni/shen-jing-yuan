@@ -45,7 +45,7 @@ APP_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = os.path.abspath(os.path.join(APP_DIR, ".."))
 sys.path.insert(0, APP_DIR)
 from backend_cpu import CPUBackend
-from backend_vec import VecBackend
+from backend_vec import VecBackend, L1, L2, MAX_OMEGA
 
 # ============================================================
 # 字体
@@ -146,6 +146,8 @@ QMainWindow, #Root { background: $bg; }
 #VSep { background: $border; }
 #HLine { background: $border; }
 #Hint { color: $dim; font-size: 11px; }
+#MuteSmall { color: $dim; font-size: 11px; }
+#TeacherCard { border-top: 1px solid $border; }
 #MetricCard { background: $panel_alt; border: 1px solid $border; border-radius: 9px; }
 #MetricLabel { color: $dim; font-size: 11px; }
 #MetricValue { color: $text; font-size: 18px; font-weight: 600;
@@ -164,6 +166,12 @@ QDoubleSpinBox, QSpinBox, QComboBox { background: $panel_alt; color: $text;
     border: 1px solid $border; border-radius: 7px; padding: 5px 8px;
     min-width: 72px; selection-background-color: $accent; }
 QDoubleSpinBox:focus, QSpinBox:focus, QComboBox:focus { border-color: $accent; }
+QDoubleSpinBox::up-button, QSpinBox::up-button {
+    subcontrol-origin: border; subcontrol-position: top right; width: 15px;
+    background: $panel_alt; border-left: 1px solid $border; }
+QDoubleSpinBox::down-button, QSpinBox::down-button {
+    subcontrol-origin: border; subcontrol-position: bottom right; width: 15px;
+    background: $panel_alt; border-left: 1px solid $border; }
 QComboBox::drop-down { border: 0px; width: 18px; }
 QComboBox QAbstractItemView { background: $panel; color: $text;
     border: 1px solid $border; selection-background-color: $accent; }
@@ -171,6 +179,34 @@ QCheckBox { color: $sub; spacing: 6px; }
 QCheckBox::indicator { width: 14px; height: 14px; border: 1px solid $border;
     border-radius: 4px; background: $panel_alt; }
 QCheckBox::indicator:checked { background: $accent; border-color: $accent; }
+QDockWidget { background: $panel; color: $text;
+              border: 1px solid $border; border-radius: 10px; }
+QDockWidget::title { background: $panel_alt; color: $text;
+    padding: 8px 12px; border-bottom: 1px solid $border;
+    text-align: left; font-weight: 600; }
+QDockWidget::content { background: $panel; }
+#SettingsBody, #SettingsPage, #SettingsViewport { background: $panel; }
+QTabWidget::pane { background: $panel; border: 1px solid $border;
+    border-radius: 8px; top: -1px; }
+QTabBar::tab { background: $panel_alt; color: $sub; padding: 6px 12px;
+    border: 1px solid $border; border-bottom: none;
+    border-top-left-radius: 7px; border-top-right-radius: 7px; }
+QTabBar::tab:selected { background: $panel; color: $text; font-weight: 600; }
+QTabBar::tab:hover { color: $text; }
+QScrollArea { background: $panel; border: none; }
+QScrollBar:vertical { background: transparent; width: 9px; margin: 2px; }
+QScrollBar::handle:vertical { background: $border; border-radius: 4px;
+    min-height: 26px; }
+QScrollBar::handle:vertical:hover { background: $accent; }
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical,
+QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
+    background: transparent; height: 0; }
+QScrollBar:horizontal { background: transparent; height: 9px; margin: 2px; }
+QScrollBar::handle:horizontal { background: $border; border-radius: 4px;
+    min-width: 26px; }
+QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal,
+QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {
+    background: transparent; width: 0; }
 QGraphicsView { border: none; background: transparent; }
 QSplitter { background: transparent; }
 QSplitter::handle { background: $border; width: 4px; margin: 10px 3px;
@@ -189,7 +225,7 @@ def build_qss(T, font=None):
 # ============================================================
 # 常量 / 预设
 # ============================================================
-LAYER_NAMES = ["输入层 · 位置编码", "隐藏层 · 脉冲整合",
+LAYER_NAMES = ["输入层 · 位置 / 本体感觉", "隐藏层 · 脉冲整合",
                "运动层 1 · ω1", "运动层 2 · ω2"]
 MEM_REST, MEM_THRESH = -65.0, -50.0
 LUT_SIZE = 256
@@ -280,12 +316,149 @@ TRAIN_SPECS = [
     ]),
 ]
 DEFAULT_TRAIN_CFG = {s[0]: s[3] for _, specs in TRAIN_SPECS for s in specs}
-CPARAM_KEYS = {s[0] for s in TRAIN_SPECS[1][1]}   # 需要写入后端的运行时参数
+# 需要写入后端的运行时参数（avg_conn 只在重建网络时使用，不能下发）
+CPARAM_KEYS = ({s[0] for s in TRAIN_SPECS[1][1]} |
+               {s[0] for s in TRAIN_SPECS[2][1] if s[0] != "avg_conn"})
 
 
 # ============================================================
 # 后端封装
 # ============================================================
+# ============================================================
+# 学习接口（蒸馏老师）：任何能根据当前状态给出「期望关节角速度」
+# (omega1, omega2) 的算法都能被脉冲网络蒸馏进来——有现成的不用是傻子。
+# 设计：先学（蒸馏老师）→ 再用（G=0 纯自主）→ 再创新（老师逐步放手，
+# 网络有机会超越老师局限）。默认无老师，主程序跑纯脉冲网络；设置面板里
+# 打开「蒸馏老师」开关后才走引导，且只在能承载引导的向量化后端生效。
+# ============================================================
+GOAL_D0 = 0.35   # 末端减速距离（仅老师信号使用）
+
+
+def _goal_omega(t1, t2, ex, ey, tx, ty, max_omega, d0):
+    """DLS 阻尼最小二乘逆运动学：已证明可达，现成的解析解。"""
+    s1, c1 = math.sin(t1), math.cos(t1)
+    s12, c12 = math.sin(t1 + t2), math.cos(t1 + t2)
+    J11 = -L1 * s1 - L2 * s12
+    J21 = L1 * c1 + L2 * c12
+    J12 = -L2 * s12
+    J22 = L2 * c12
+    err_x, err_y = tx - ex, ty - ey
+    d = math.sqrt(err_x * err_x + err_y * err_y)
+    if d < 1e-9 or d0 <= 1e-9:
+        return 0.0, 0.0
+    lam2 = 0.0625
+    a11 = J11 * J11 + J12 * J12 + lam2
+    a12 = J11 * J21 + J12 * J22
+    a22 = J21 * J21 + J22 * J22 + lam2
+    det = a11 * a22 - a12 * a12
+    if det > 1e-9:
+        vx = (a22 * err_x - a12 * err_y) / det
+        vy = (-a12 * err_x + a11 * err_y) / det
+    else:
+        vx, vy = err_x, err_y
+    g1 = J11 * vx + J21 * vy
+    g2 = J12 * vx + J22 * vy
+    gm = max(abs(g1), abs(g2))
+    if gm < 1e-9:
+        return 0.0, 0.0
+    speed = max_omega * min(1.0, d / d0)
+    return g1 / gm * speed, g2 / gm * speed
+
+
+class Teacher:
+    """蒸馏老师基类。子类只需实现 command(state)->(omega1, omega2)。
+
+    state 统一字段：theta1, theta2, end_x, end_y, target_x, target_y,
+    L1, L2, max_omega。想蒸馏新算法，只需新增一个继承 Teacher 的类。
+    """
+
+    name = "老师"
+    desc = "蒸馏老师基类"
+    normalize = True          # 训练目标是否归一到满速
+
+    def reset(self, target_x, target_y):
+        self.tx, self.ty = target_x, target_y
+
+    def command(self, st):
+        raise NotImplementedError
+
+    def target(self, w1, w2):
+        if not self.normalize:
+            return w1, w2
+        gm = max(abs(w1), abs(w2), 1e-12)
+        sc = MAX_OMEGA / gm
+        return w1 * sc, w2 * sc
+
+
+class DLSTeacher(Teacher):
+    """阻尼最小二乘逆运动学（现成解析解，已知可达）—— 默认的「现成老师」。"""
+
+    name = "DLS 逆运动学（现成解析解）"
+
+    def __init__(self, d0=GOAL_D0):
+        self.d0 = d0
+
+    def command(self, st):
+        return _goal_omega(st["theta1"], st["theta2"], st["end_x"], st["end_y"],
+                           st["target_x"], st["target_y"], st["max_omega"], self.d0)
+
+
+class TransposeTeacher(Teacher):
+    """转置雅可比梯度法（另一种 IK 算法）—— 演示「换一个算法当老师」。"""
+
+    name = "转置雅可比（另一种 IK）"
+
+    def __init__(self, gain=0.6, d0=GOAL_D0):
+        self.gain, self.d0 = gain, d0
+
+    def command(self, st):
+        t1, t2 = st["theta1"], st["theta2"]
+        L1_, L2_ = st["L1"], st["L2"]
+        s1, c1 = math.sin(t1), math.cos(t1)
+        s12, c12 = math.sin(t1 + t2), math.cos(t1 + t2)
+        J11, J21 = -L1_ * s1 - L2_ * s12, L1_ * c1 + L2_ * c12
+        J12, J22 = -L2_ * s12, L2_ * c12
+        errx, erry = st["target_x"] - st["end_x"], st["target_y"] - st["end_y"]
+        d = math.hypot(errx, erry) + 1e-12
+        sp = st["max_omega"] * min(1.0, d / self.d0)
+        ux, uy = errx / d * sp, erry / d * sp
+        return J11 * ux + J21 * uy, (J12 * ux + J22 * uy) * self.gain
+
+
+class NullTeacher(Teacher):
+    """不教（基线）—— 用以校准诚实预期（纯网络本就到不了）。"""
+
+    name = "无老师（纯网络基线）"
+    normalize = False
+
+    def command(self, st):
+        return 0.0, 0.0
+
+
+class FuncTeacher(Teacher):
+    """把你自己的 AI / 算法接进来：任意 callable(state)->(w1, w2)。
+
+    用法：teacher = FuncTeacher(my_policy, name="我的RL策略")
+        def my_policy(st):
+            errx = st["target_x"] - st["end_x"]
+            return errx * 0.5, 0.0
+    """
+
+    def __init__(self, fn, name="自定义老师", normalize=True):
+        self.fn, self.name, self.normalize = fn, name, normalize
+
+    def command(self, st):
+        return self.fn(st)
+
+
+TEACHERS = {
+    "dls": DLSTeacher,
+    "transpose": TransposeTeacher,
+    "null": NullTeacher,
+}
+TEACHER_KEYS = ["none", "dls", "transpose", "null"]
+
+
 class SimEngine:
     """统一三种后端 + 在线训练循环（每 tick 注入奖励、碰到目标结算并重置重来）"""
 
@@ -306,6 +479,21 @@ class SimEngine:
         self.last_episode_ticks = 0
         self.prev_ex, self.prev_ey = 2.0, 0.0
         self.arrived_this_episode = False
+        self._trail_buf = []
+        # 蒸馏老师（学习接口）：默认无老师，主程序跑纯脉冲网络
+        self._teacher = None
+        self._teacher_g = 0.7          # 引导比例：(1-G)·网络 + G·老师
+        self._teacher_g_min = 0.02
+        self._teacher_decay = 0.97     # 逐步放手退火系数
+        self._teacher_anneal = False
+
+    def drain_trail(self):
+        """取走本轮循环内每个 tick 的末端点（供渲染层一次性画完）"""
+        if not self._trail_buf:
+            return None
+        pts = self._trail_buf
+        self._trail_buf = []
+        return pts
 
     @property
     def training_supported(self):
@@ -313,6 +501,7 @@ class SimEngine:
 
     def reset(self, device_key, cfg, seed, avg_conn=8.0):
         self.destroy()
+        self._trail_buf = []
         i, h, m1, m2 = cfg
         if device_key == "cuda":
             be = VecBackend(device="gpu", seed=seed)
@@ -347,15 +536,57 @@ class SimEngine:
     def tick(self):
         self.be.tick()
 
+    # ---------- 蒸馏老师（学习接口） ----------
+    @property
+    def _teacher_capable(self):
+        """只有能承载 motor_override 的向量化后端才支持引导（C DLL 不认）。"""
+        return (self._teacher is not None
+                and hasattr(self.be, "motor_override")
+                and hasattr(self.be, "_decode_omega"))
+
+    def _net_output(self):
+        """本 tick 网络原始解码（用上一 tick 的脉冲，不含引导、不含噪声）。"""
+        be = self.be
+        if not hasattr(be, "_decode_omega"):
+            return 0.0, 0.0
+        N = be.config["neuron_count"]
+        return (be._decode_omega(be.m1_start, be.m2_start),
+                be._decode_omega(be.m2_start, N))
+
+    def _teacher_state(self):
+        be = self.be
+        ex, ey, tx, ty, _ = be.get_arm()
+        return {"theta1": be.arm_theta1, "theta2": be.arm_theta2,
+                "end_x": ex, "end_y": ey,
+                "target_x": tx, "target_y": ty,
+                "L1": L1, "L2": L2, "max_omega": MAX_OMEGA}
+
+    def _apply_teacher(self):
+        """若启用老师：计算 ω=(1-G)·网络 + G·老师，经后端 motor_override 注入。
+        G=0 时退化为纯网络自主解码。C DLL 后端不认 motor_override，自动跳过。"""
+        be = self.be
+        if not self._teacher_capable:
+            if hasattr(be, "motor_override"):
+                be.motor_override = None
+            return
+        w1, w2 = self._net_output()
+        st = self._teacher_state()
+        g1, g2 = self._teacher.command(st)
+        G = self._teacher_g
+        o1 = max(-MAX_OMEGA, min(MAX_OMEGA, (1.0 - G) * w1 + G * g1))
+        o2 = max(-MAX_OMEGA, min(MAX_OMEGA, (1.0 - G) * w2 + G * g2))
+        be.motor_override = (o1, o2)
+
     def train_tick(self):
         """一个仿真步：推进物理 → 计算即时奖励 → 注入 → 判定结算/重来"""
         be = self.be
         c = self.train_cfg
-        if not c["train_enabled"] or not self.training_supported:
-            be.tick()
-            return
+        self._apply_teacher()          # 若启用老师：注入 motor_override（仅向量化后端生效）
         be.tick()
         ex, ey, tx, ty, _ = be.get_arm()
+        self._trail_buf.append((ex, ey))
+        if not c["train_enabled"] or not self.training_supported:
+            return
         dist = math.hypot(ex - tx, ey - ty)
         vx, vy = ex - self.prev_ex, ey - self.prev_ey
         tvx, tvy = tx - ex, ty - ey
@@ -391,11 +622,16 @@ class SimEngine:
             self.episode += 1
             self.arrivals += 1
             self.last_episode_ticks = self.trial_tick
+            # 老师逐步放手（先学 → 再用）：G 退火，让网络逐步接管控制权
+            if self._teacher_anneal and self._teacher is not None:
+                self._teacher_g = max(self._teacher_g_min,
+                                     self._teacher_g * self._teacher_decay)
             ntx, nty = self._next_target()
             self.episode_reset(ntx, nty)
 
     def episode_reset(self, tx, ty):
         """重置一轮：后端归位，同时同步窗口侧的本轮计数（外部也可安全调用）"""
+        self._trail_buf = []   # 清空轨迹：新一轮只画本次运动，不留上一轮残影/瞬移
         self.be.episode_reset(tx, ty)
         self.prev_ex, self.prev_ey = 2.0, 0.0
         self.trial_tick = 0
@@ -404,7 +640,9 @@ class SimEngine:
     def _next_target(self):
         if not self.train_cfg["auto_target"]:
             return self.manual_target
-        r = 0.3 + random.random() * 1.2
+        # 肘关节限位 ±0.9π → 末端最短可达半径 2cos(0.45π) ≈ 0.313，
+        # 下限取 0.4 保证物理可达；上限 1.5 < 臂长 2。
+        r = 0.4 + random.random() * 1.1
         a = random.random() * math.pi * 2
         return (round(r * math.cos(a), 2), round(r * math.sin(a), 2))
 
@@ -481,7 +719,8 @@ class SimWorker(QThread):
                 snap = (np.ascontiguousarray(mem, dtype=np.float32),
                         np.ascontiguousarray(spk, dtype=np.int32),
                         np.ascontiguousarray(arm, dtype=np.float64),
-                        np.ascontiguousarray(meta, dtype=np.int32))
+                        np.ascontiguousarray(meta, dtype=np.int32),
+                        self.engine.drain_trail())
                 with self._lock:
                     self._latest = snap
                 self._count += self._steps
@@ -1007,7 +1246,7 @@ class ArmPhysicsView(QGraphicsView):
                                  2 * self.EXTENT, 2 * self.EXTENT)
         self._target = (0.5, 0.5)
         self._fitting = False
-        self.trail = deque(maxlen=240)
+        self.trail = deque(maxlen=600)
         self.trail_path = QPainterPath()
         self.apply_theme(T)
         self.setTarget(*self._target)
@@ -1118,6 +1357,34 @@ class ArmPhysicsView(QGraphicsView):
         self.trail_path = QPainterPath()
         self.trail_item.setPath(self.trail_path)
 
+    def append_trail(self, points):
+        """批量追加一帧内所有 tick 的末端点。
+
+        高速设备（GPU / 25x）一个渲染帧之间会跑几十个 tick，
+        若每帧只画一个点，轨迹就变成稀疏折线、看起来像瞬移乱跳。
+        这里把 worker 收集到的每一步都补上；None 表示一轮结束的断点。
+        """
+        if not points:
+            return
+        s = self.SCALE
+        for p in points:
+            if p is None:
+                self.trail.append(None)
+            else:
+                self.trail.append((p[0] * s, -p[1] * s))
+        self.trail_path = QPainterPath()
+        down = False
+        for p in self.trail:
+            if p is None:
+                down = False
+                continue
+            if down:
+                self.trail_path.lineTo(*p)
+            else:
+                self.trail_path.moveTo(*p)
+                down = True
+        self.trail_item.setPath(self.trail_path)
+
     def update_arm(self, t1, t2, o1, o2, ex, ey, max_reach):
         s = self.SCALE
         e1x, e1y = math.cos(t1), math.sin(t1)
@@ -1133,21 +1400,6 @@ class ArmPhysicsView(QGraphicsView):
         self.e_halo.setRect(bx - 13, by - 13, 26, 26)
         self.e_dot.setRect(bx - 5, by - 5, 10, 10)
         self.e_lbl.setPos(bx + 11, by - 20)
-        if len(self.trail) == self.trail.maxlen:
-            self.trail.popleft()
-            self.trail.append((bx, by))
-            self.trail_path = QPainterPath()
-            pts = list(self.trail)
-            self.trail_path.moveTo(*pts[0])
-            for px, py in pts[1:]:
-                self.trail_path.lineTo(px, py)
-        else:
-            if self.trail:
-                self.trail_path.lineTo(bx, by)
-            else:
-                self.trail_path.moveTo(bx, by)
-            self.trail.append((bx, by))
-        self.trail_item.setPath(self.trail_path)
 
     def _fit(self):
         if self._fitting:
@@ -1172,8 +1424,18 @@ class MainWindow(QMainWindow):
         self.T = THEMES[theme_key]
         self._initializing = True      # 构建控件期间屏蔽信号触发的 _reset
         self.controls = {}
+        self._last_episode = -1        # 轨迹按回合清空：检测 episode 变化
+        self._teacher_forced_vec = False   # 是否因启用老师而强制切到向量化后端
         self.setWindowTitle("脉冲神经网络 · 实时训练可视化  |  Benchmark-2")
-        self.resize(1680, 1000)
+        # 按当前屏幕工作区自适应，避免 150% 缩放下窗口底边被任务栏遮住
+        scr = QGuiApplication.primaryScreen()
+        avail = scr.availableGeometry() if scr else None
+        if avail and avail.isValid() and avail.width() > 0:
+            win_w = max(1280, min(1680, avail.width() - 28))
+            win_h = max(760, min(1000, avail.height() - 48))
+        else:
+            win_w, win_h = 1680, 1000
+        self.resize(win_w, win_h)
         self.setMinimumSize(1280, 760)
 
         root = QWidget()
@@ -1216,6 +1478,10 @@ class MainWindow(QMainWindow):
         main.addWidget(right)
         main.setStretchFactor(0, 3)
         main.setStretchFactor(1, 2)
+        net_card.setMinimumWidth(340)
+        right.setMinimumWidth(340)
+        # 显式给出初始宽度，避免子面板的 sizeHint 把 3:2 比例挤反
+        main.setSizes([int(win_w * 0.58), int(win_w * 0.42)])
         lay.addWidget(main, 1)
         lay.addWidget(self._build_footer())
 
@@ -1365,7 +1631,7 @@ class MainWindow(QMainWindow):
         hl.addWidget(b)
         hl.addSpacing(4)
         hl.addWidget(sep())
-        b = QPushButton("⚙ 设置")
+        b = QPushButton("设置面板")
         b.setObjectName("Ghost")
         b.setToolTip("显示/隐藏训练与参数面板（快捷键 P）")
         b.clicked.connect(self._toggle_settings)
@@ -1374,6 +1640,11 @@ class MainWindow(QMainWindow):
         self.lbl_trial.setObjectName("Perf")
         self.lbl_trial.setToolTip("累计完成轮次 / 碰到目标次数 / 本轮步数")
         hl.addWidget(self.lbl_trial)
+        self.lbl_teacher_status = QLabel("老师：无")
+        self.lbl_teacher_status.setObjectName("Perf")
+        self.lbl_teacher_status.setToolTip(
+            "蒸馏老师状态（学习接口）：网络先模仿老师，再逐步自主")
+        hl.addWidget(self.lbl_teacher_status)
         hl.addStretch(1)
         return bar
 
@@ -1451,6 +1722,7 @@ class MainWindow(QMainWindow):
         tabs = QTabWidget()
         for group, specs in TRAIN_SPECS:
             page = QWidget()
+            page.setObjectName("SettingsPage")
             form = QFormLayout(page)
             form.setContentsMargins(10, 10, 10, 10)
             form.setSpacing(7)
@@ -1463,6 +1735,7 @@ class MainWindow(QMainWindow):
                 form.addRow(lab, w)
             scroll = QScrollArea()
             scroll.setWidgetResizable(True)
+            scroll.viewport().setObjectName("SettingsViewport")
             scroll.setWidget(page)
             tabs.addTab(scroll, group)
         btn_apply = QPushButton("应用设置")
@@ -1478,16 +1751,64 @@ class MainWindow(QMainWindow):
         h.addWidget(btn_default)
         h.addWidget(btn_apply, 1)
         box = QWidget()
+        box.setObjectName("SettingsBody")
         v = QVBoxLayout(box)
         v.setContentsMargins(0, 0, 0, 0)
         v.setSpacing(0)
         v.addWidget(tabs, 1)
+        v.insertWidget(1, self._build_teacher_card())
         v.addWidget(row)
         dock.setWidget(box)
-        dock.setMinimumWidth(300)
+        dock.setMinimumWidth(340)
         self.settings_dock = dock
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock)
+        dock.hide()          # 默认收起，避免挤压网络/机械臂视图；P 或「设置面板」展开
         self._apply_settings(silent=True)
+
+    def _build_teacher_card(self):
+        """蒸馏老师（学习接口）设置卡片：选老师 + 引导比例 G + 逐步放手。"""
+        card = QWidget()
+        card.setObjectName("TeacherCard")
+        v = QVBoxLayout(card)
+        v.setContentsMargins(12, 10, 12, 10)
+        v.setSpacing(8)
+        ttl = QLabel("蒸馏老师（学习接口）")
+        ttl.setObjectName("CardTitle")
+        v.addWidget(ttl)
+
+        self.combo_teacher = QComboBox()
+        self.combo_teacher.addItems([
+            "无老师（纯脉冲网络）", "DLS 逆运动学（现成解析解）",
+            "转置雅可比（另一种 IK）", "无老师基线"])
+        self.combo_teacher.setMinimumWidth(180)
+        self.combo_teacher.currentIndexChanged.connect(self._on_teacher)
+        v.addWidget(self.combo_teacher)
+
+        gh = QWidget()
+        ghb = QHBoxLayout(gh)
+        ghb.setContentsMargins(0, 0, 0, 0)
+        ghb.setSpacing(8)
+        ghb.addWidget(QLabel("引导比例 G"))
+        self.spin_teacher_g = QDoubleSpinBox()
+        self.spin_teacher_g.setRange(0.0, 1.0)
+        self.spin_teacher_g.setSingleStep(0.05)
+        self.spin_teacher_g.setValue(0.7)
+        self.spin_teacher_g.setDecimals(2)
+        self.spin_teacher_g.valueChanged.connect(self._on_teacher_g)
+        ghb.addWidget(self.spin_teacher_g, 1)
+        v.addWidget(gh)
+
+        self.chk_anneal = QCheckBox("逐步放手（G 退火 · 先学再用）")
+        self.chk_anneal.setToolTip("勾选后每碰到一次目标 G 乘以 0.97，网络逐步接管控制权")
+        self.chk_anneal.toggled.connect(self._on_teacher_anneal)
+        v.addWidget(self.chk_anneal)
+
+        tip = QLabel("先学（蒸馏老师）→ 再用（G=0 纯自主）→ 再创新。引导需在向量化"
+                     "后端承载：选老师会自动从 C DLL 切过去。")
+        tip.setObjectName("MuteSmall")
+        tip.setWordWrap(True)
+        v.addWidget(tip)
+        return card
 
     def _param_values(self):
         vals = {}
@@ -1538,6 +1859,43 @@ class MainWindow(QMainWindow):
 
     def _toggle_settings(self):
         self.settings_dock.setVisible(not self.settings_dock.isVisible())
+
+    # ---------- 蒸馏老师（学习接口） ----------
+    def _on_teacher(self, idx):
+        if not hasattr(self, "combo_dev"):
+            return   # 构建阶段 combo_dev 尚未创建，跳过
+        key = TEACHER_KEYS[max(0, idx)]
+        if key == "none":
+            self.engine._teacher = None
+            self._teacher_status("老师：无")
+            if self._teacher_forced_vec:
+                self._teacher_forced_vec = False
+                self.combo_dev.setCurrentIndex(DEFAULT_DEVICE_INDEX)  # 触发 _reset
+            return
+        self.engine._teacher = TEACHERS[key]()
+        self.engine._teacher_g = float(self.spin_teacher_g.value())
+        self.engine._teacher_anneal = self.chk_anneal.isChecked()
+        self._teacher_forced_vec = False
+        # 引导钩子只在向量化后端生效：选老师且当前是 C DLL 时自动切过去
+        if DEVICES[self.combo_dev.currentIndex()][1] == "cdll":
+            self._teacher_forced_vec = True
+            idx_vec = 0 if DEVICES[0][1] == "cuda" else 1
+            self.combo_dev.setCurrentIndex(idx_vec)   # 触发 _reset（engine 复用，保留 _teacher）
+            self._teacher_status("老师：%s · G=%.2f（已切向量化后端）" %
+                                 (self.engine._teacher.name, self.engine._teacher_g))
+        else:
+            self._teacher_status("老师：%s · G=%.2f" %
+                                 (self.engine._teacher.name, self.engine._teacher_g))
+
+    def _on_teacher_g(self, v):
+        self.engine._teacher_g = float(v)
+
+    def _on_teacher_anneal(self, v):
+        self.engine._teacher_anneal = bool(v)
+
+    def _teacher_status(self, text):
+        if hasattr(self, "lbl_teacher_status"):
+            self.lbl_teacher_status.setText(text)
 
     def _update_trial_label(self):
         if not hasattr(self, "lbl_trial"):
@@ -1714,7 +2072,7 @@ class MainWindow(QMainWindow):
         self._last_target = (tx, ty)
 
     def _random_target(self):
-        r = 0.3 + random.random() * 1.2
+        r = 0.4 + random.random() * 1.1
         a = random.random() * math.pi * 2
         self.spin_tx.setValue(round(r * math.cos(a), 2))
         self.spin_ty.setValue(round(r * math.sin(a), 2))
@@ -1751,13 +2109,19 @@ class MainWindow(QMainWindow):
     def _refresh_frame(self, snap):
         if snap is None:
             return
-        mem, spk, arm, meta = snap
+        mem, spk, arm, meta = snap[:4]
+        trail = snap[4] if len(snap) > 4 else None
         self.net_view.update_snapshot(mem, spk)
         t1, t2 = float(arm[0]), float(arm[1])
         tx, ty = float(arm[6]), float(arm[7])
         ex, ey = float(arm[4]), float(arm[5])
         mr = float(arm[9])
         self.arm_view.update_arm(t1, t2, float(arm[2]), float(arm[3]), ex, ey, mr)
+        # 新一轮开始：清空轨迹，只显示当前轮运动（去掉上一轮残影/瞬移）
+        if self.engine.episode != self._last_episode:
+            self.arm_view.clearTrail()
+            self._last_episode = self.engine.episode
+        self.arm_view.append_trail(trail if trail else [(ex, ey)])
         if (tx, ty) != self._last_target:
             self.arm_view.setTarget(tx, ty)
             self._last_target = (tx, ty)
@@ -1777,6 +2141,11 @@ class MainWindow(QMainWindow):
         self.metrics["total"].set_value(f"{self._total_reward:+.1f}")
         self.metrics["episode"].set_value(f"{self.engine.episode}")
         self.metrics["trial"].set_value(f"{self.engine.trial_tick}")
+        if self.engine._teacher is not None:
+            self.lbl_teacher_status.setText(
+                "老师：%s · G=%.2f%s" % (
+                    self.engine._teacher.name, self.engine._teacher_g,
+                    " · 退火中" if self.engine._teacher_anneal else ""))
         self.chart.push(r, dist, sp / len(mem) if len(mem) else 0.0)
         self._update_trial_label()
 

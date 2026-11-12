@@ -85,6 +85,12 @@ typedef struct {
     double pref_x;        /* 偏好位置 x（INPUT_X 用） */
     double pref_y;        /* 偏好位置 y（INPUT_X 用） */
     double pref_omega;    /* 偏好角速度（MOTOR 用，范围 -1~1） */
+
+    /* v6 异构群体编码：每神经元独立的膜时间常数与调谐宽度。
+     * net2_init 统一写入默认 = 全局常量，保证旧实验逐位可复现；
+     * 只有显式打开 hetero_* 参数时运动层才会被扰动。 */
+    double membrane_decay;   /* 默认 MEMBRANE_DECAY */
+    double tuning_width;     /* 默认 1.0；decode_mode=2 时作为解码加权系数 */
 } Neuron2;
 
 /* ============================================================
@@ -99,12 +105,22 @@ typedef struct {
 } Synapse2;
 
 /* ============================================================
- * 奖励事件队列（双通道：r1 给 MOTOR1 突触，r2 给 MOTOR2 突触）
+ * 调制事件队列 —— v6 三因子消息格式
+ *   第一因子：Hebbian 共激活（STDP 核，在资格迹里）
+ *   第二因子：资格迹 eligibility_trace
+ *   第三因子：全局调质，拆成三类语境通道
+ *     r1/r2        奖励预测误差（类多巴胺），按关节分通道
+ *     e1/e2        感觉/运动误差（类小脑攀爬纤维），逐 tick 连续有符号
+ *     novelty      惊讶/新颖性（类乙酰胆碱），瞬时放大学习率
+ * 旧版只有 r1/r2；新增字段默认 0，旧调用方行为完全不变。
  * ============================================================ */
 typedef struct {
     double reward_scalar;   /* 兼容字段 = (r1+r2)/2，用于 baseline */
     double r1;              /* 关节1 专用奖励 */
     double r2;              /* 关节2 专用奖励 */
+    double e1;              /* 关节1 感觉预测误差：(omega*_1 - omega_1) - EMA */
+    double e2;              /* 关节2 感觉预测误差：(omega*_2 - omega_2) - EMA */
+    double novelty;         /* |reward - baseline| 归一化后的惊讶度 */
     int delivery_tick;
 } RewardEvent2;
 
@@ -126,6 +142,16 @@ typedef struct {
     int    decode_mode;            /* 0=WTA-K 均值(默认), 2=按 winner 膜电位加权 */
     int    wta_k;                  /* MOTOR 层 winner 数，默认 3 */
     int    use_reward_baseline;    /* 1=减滑动基线(默认), 0=使用原始奖励误差 */
+
+    /* ---- v6：三因子调制 / 攀爬纤维误差 / 异构群体编码 ----
+     * 全部默认 0（cf_lambda=1），即旧行为；A/B 时只打开需要的通道。 */
+    double error_gain;       /* 运动误差通道增益（攀爬纤维 → 定向 LTD） */
+    double novelty_gain;     /* 惊讶度通道增益：瞬时放大学习率 */
+    double cf_lambda;        /* 逆运动学期望速度缩放，默认 1.0 */
+    double hetero_tau;       /* 运动层膜衰减对数正态 sigma，0=关闭 */
+    double hetero_thresh;    /* 运动层发放阈值高斯 sigma (mV)，0=关闭 */
+    double hetero_tune;      /* 运动层调谐宽度对数正态 sigma，0=关闭 */
+
 } HyperParams2;
 
 /* ============================================================
@@ -177,6 +203,14 @@ typedef struct {
     
     int use_eligibility_trace;
     int use_reward_modulation;
+
+    /* 攀爬纤维：最近一个 tick 算出的关节级有符号运动误差与期望角速度。
+     * net2_tick 的物理步之后写入，net2_inject_* 入队时读取，时序严格对齐。 */
+    double cf_err1, cf_err2;
+    double cf_omega1_star, cf_omega2_star;
+    /* 误差的滑动预期：真正驱动学习的是 de = e - EMA(e)（预测误差/意外），
+     * 而不是绝对误差 e。绝对误差是直流分量，会把权重单向推到饱和。 */
+    double cf_ema1, cf_ema2;
 } NetworkState2;
 
 /* ============================================================
@@ -200,10 +234,19 @@ void net2_tick(NetworkState2* net);
 /* 目标控制（宿主调用） */
 void net2_set_target(NetworkState2* net, double tx, double ty);
 
-/* 奖励注入 */
+/* 奖励注入（旧接口，内部转调 net2_inject_modulation 并填 0 误差通道） */
 void net2_inject_reward(NetworkState2* net, double reward, int delay_ticks);
 /* 双通道奖励注入：r1→MOTOR1 突触，r2→MOTOR2 突触，其余突触用均值 */
 void net2_inject_reward2(NetworkState2* net, double r1, double r2, int delay_ticks);
+
+/* v6 多通道调制注入：奖励 + 关节级运动误差 + 惊讶度。
+ * e1/e2 只作用于 MOTOR 层输入突触，按其偏好方向做定向 LTD/LTP；
+ * novelty 只影响学习率增益，不改变 STDP 核。 */
+void net2_inject_modulation(NetworkState2* net, double r1, double r2,
+                            double e1, double e2, double novelty,
+                            int delay_ticks);
+/* 读取最近一 tick 的攀爬纤维状态：[err1, err2, omega1*, omega2*] */
+void net2_get_cf_error(const NetworkState2* net, double* out4);
 
 /* 物理步进（宿主可选手动控制） */
 void arm_step(ArmState* arm, double omega1_cmd, double omega2_cmd);
@@ -219,7 +262,9 @@ void net2_reset_ema(void);
  *   learning_rate, tau_stdp, tau_trace, stdp_a_plus, stdp_a_minus,
  *   weight_decay_lambda, reward_baseline_window, psp_factor, trace_clamp,
  *   decode_mode(0|2), wta_k(1..64), use_reward_baseline(0|1),
- *   el_trace(0|1), reward_mod(0|1)
+ *   el_trace(0|1), reward_mod(0|1),
+ *   error_gain(0..10), novelty_gain(0..10), cf_lambda(0.1..10),
+ *   hetero_tau(0..1), hetero_thresh(0..10), hetero_tune(0..1)
  * 返回 0=成功，-1=未知参数或取值非法；tau_trace 会同步重算 lambda_trace，
  * reward_baseline_window 会重新分配奖励历史缓冲。 */
 int    net2_set_param(NetworkState2* net, const char* name, double value);

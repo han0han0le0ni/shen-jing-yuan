@@ -1,4 +1,4 @@
-﻿﻿/*
+/*
  * benchmark2_core.c - Benchmark-2 核心实现
  * 两关节虚拟臂到达
  *
@@ -53,6 +53,48 @@ static int ensure_synapse_capacity(NetworkState2* net, int needed) {
 static double g_ema_o1 = 0.0, g_ema_o2 = 0.0;
 void net2_reset_ema(void) { g_ema_o1 = 0.0; g_ema_o2 = 0.0; }
 
+/* ============================================================
+ * v6 异构群体编码：独立于主 RNG，避免打开 hetero_* 时
+ * 消耗 g_rand 而污染 A/B 对照的随机序列。
+ * ============================================================ */
+static unsigned int g_het_rand = 20261111u;
+static inline double het_u(void) {
+    g_het_rand = g_het_rand * 1664525u + 1013904223u;
+    return (double)((g_het_rand >> 8) & 0xFFFFFF) / 16777216.0;
+}
+static inline double het_gauss(void) {
+    double u1 = het_u(), u2 = het_u();
+    if (u1 < 1e-12) u1 = 1e-12;
+    return sqrt(-2.0 * log(u1)) * cos(2.0 * M_PI * u2);
+}
+
+/* 只扰动运动层。三个 sigma 全为 0 时结果 = 旧版逐位一致。
+ * 膜时间常数取对数正态、阈值取高斯、调谐宽度取对数正态，
+ * 偏好角速度保持均匀覆盖并加微抖动。 */
+static void apply_heterogeneity(NetworkState2* net) {
+    if (!net || !net->neurons) return;
+    HyperParams2* hp = &net->hp;
+    g_het_rand = 20261111u;          /* 固定种子：每次调用得到同一组异质参数 */
+    int m1_base = net->input_count + net->hidden_count;
+    int m2_base = m1_base + net->motor1_count;
+    for (int layer = 0; layer < 2; layer++) {
+        int base = (layer == 0) ? m1_base : m2_base;
+        int cnt  = (layer == 0) ? net->motor1_count : net->motor2_count;
+        for (int i = 0; i < cnt; i++) {
+            Neuron2* n = &net->neurons[base + i];
+            double base_pref = -0.5 + 1.0 * (double)i / (double)(cnt - 1);
+            double f = (hp->hetero_tau > 0.0) ? exp(het_gauss() * hp->hetero_tau) : 1.0;
+            n->membrane_decay = clamp2(1.0 - (1.0 - MEMBRANE_DECAY) * f, 0.80, 0.995);
+            n->spike_threshold = SPIKE_THRESHOLD
+                + ((hp->hetero_thresh > 0.0) ? het_gauss() * hp->hetero_thresh : 0.0);
+            n->tuning_width = (hp->hetero_tune > 0.0)
+                ? clamp2(exp(het_gauss() * hp->hetero_tune), 0.4, 2.5) : 1.0;
+            n->pref_omega = base_pref
+                + ((hp->hetero_tune > 0.0) ? het_gauss() * 0.02 * hp->hetero_tune : 0.0);
+        }
+    }
+}
+
 void arm_step(ArmState* arm, double omega1_cmd, double omega2_cmd) {
     /* 直接用原始 omega，不加 EMA 平滑
      * 抖动是好事：让 arm 有机会朝各种方向试探，碰到正反馈就能启动学习 */
@@ -63,9 +105,12 @@ void arm_step(ArmState* arm, double omega1_cmd, double omega2_cmd) {
     arm->theta1 += arm->omega1 * ARM_DT;
     arm->theta2 += arm->omega2 * ARM_DT;
     
-    /* 边界反弹 */
-    if (arm->theta1 < ARM_THETA1_MIN) arm->theta1 = ARM_THETA1_MIN;
-    if (arm->theta1 > ARM_THETA1_MAX) arm->theta1 = ARM_THETA1_MAX;
+    /* 肩关节可 360° 旋转：周期性回绕，不能硬裁剪。
+     * 旧版把 θ1 钳在 ±π，一旦顶到边界就成了吸收态（ω 方向不变时永远
+     * 出不来），末端自由度只剩 θ2，只能在以肘为圆心的单位圆上绕圈。 */
+    if (arm->theta1 > M_PI)  arm->theta1 -= 2.0 * M_PI;
+    if (arm->theta1 < -M_PI) arm->theta1 += 2.0 * M_PI;
+    /* 肘关节保留生理限位 */
     if (arm->theta2 < ARM_THETA2_MIN) arm->theta2 = ARM_THETA2_MIN;
     if (arm->theta2 > ARM_THETA2_MAX) arm->theta2 = ARM_THETA2_MAX;
     
@@ -114,6 +159,12 @@ int net2_init(NetworkState2* net, int input_n, int hidden_n,
     
     /* 1. 位置编码输入层：偏好点均匀分布在工作空间 */
     int idx = 0, i;
+    /* v6：所有神经元先写入统一的膜动力学默认值（calloc 给的是 0，
+     * 直接拿来当衰减系数会让膜电位每 tick 归零，必须显式初始化）。*/
+    for (i = 0; i < net->neuron_count; i++) {
+        net->neurons[i].membrane_decay = MEMBRANE_DECAY;
+        net->neurons[i].tuning_width = 1.0;
+    }
     for (i = 0; i < input_n; i++, idx++) {
         net->neurons[idx].id = idx;
         net->neurons[idx].type = NT_INPUT_X;
@@ -373,7 +424,14 @@ int net2_init(NetworkState2* net, int input_n, int hidden_n,
     net->hp.decode_mode = 0;
     net->hp.wta_k = 3;
     net->hp.use_reward_baseline = 1;
-    
+    /* v6 三因子通道 / 异构群体编码：默认全关，旧实验逐位可复现 */
+    net->hp.error_gain     = 0.0;
+    net->hp.novelty_gain   = 0.0;
+    net->hp.cf_lambda      = 1.0;
+    net->hp.hetero_tau     = 0.0;
+    net->hp.hetero_thresh  = 0.0;
+    net->hp.hetero_tune    = 0.0;
+
     #if ELIGIBILITY_TRACE_ENABLE
     net->use_eligibility_trace = 1;
     #else
@@ -481,9 +539,16 @@ void net2_tick(NetworkState2* net) {
         double err = ev.reward_scalar - base;
         double err1 = ev.r1 - base;
         double err2 = ev.r2 - base;
-        
+
+        /* 第三因子之「惊讶/新颖性」通道（类乙酰胆碱）：奖励偏离预期越多，
+         * 本步学习率越高。只做增益，不碰 STDP 核与资格迹。 */
+        double nov = 1.0 + net->hp.novelty_gain * clamp2(ev.novelty, 0.0, 2.0);
+        int has_reward = fabs(err) > 0.001;
+        int has_error  = (net->hp.error_gain > 0.0) &&
+                         (fabs(ev.e1) > 1e-6 || fabs(ev.e2) > 1e-6);
+
         #if REWARD_MODULATION_ENABLE
-        if (net->use_reward_modulation && fabs(err) > 0.001) {
+        if (net->use_reward_modulation && (has_reward || has_error)) {
             for (int s = 0; s < net->synapse_count; s++) {
                 Synapse2* syn = &net->synapses[s];
                 #if ELIGIBILITY_TRACE_ENABLE
@@ -491,14 +556,33 @@ void net2_tick(NetworkState2* net) {
                 #else
                 double credit = 0.0;
                 #endif
-                if (fabs(credit) > 1e-8) {
-                    NeuronType2 pt = net->neurons[syn->post_id].type;
-                    double e = (pt == NT_MOTOR_OMEGA1) ? err1
-                             : (pt == NT_MOTOR_OMEGA2) ? err2 : err;
-                    
-                    double dw = net->hp.learning_rate * e * credit;
-                    syn->weight = clamp2(syn->weight + dw, WEIGHT_MIN, WEIGHT_MAX);
+                if (fabs(credit) <= 1e-8) continue;
+
+                Neuron2* post = &net->neurons[syn->post_id];
+                NeuronType2 pt = post->type;
+                double e = (pt == NT_MOTOR_OMEGA1) ? err1
+                         : (pt == NT_MOTOR_OMEGA2) ? err2 : err;
+
+                /* 奖励通道（类多巴胺）：原 R-STDP，nov=1 时与旧版逐位一致 */
+                double dw = net->hp.learning_rate * nov * e * credit;
+
+                /* 运动误差通道（类小脑攀爬纤维 → 浦肯野细胞定向 LTD）：
+                 * e_j = omega*_j - omega_j 是逐 tick、连续、有符号的关节级
+                 * 感觉预测误差；dir = tanh(pref/0.15) 是突触后神经元编码的
+                 * 输出方向。同号 → 增强正确方向(LTP)，异号 → 抑制导致错误
+                 * 方向的突触(LTD)。只作用于运动层输入突触，不改变隐藏层。 */
+                if (has_error && (pt == NT_MOTOR_OMEGA1 || pt == NT_MOTOR_OMEGA2)) {
+                    /* 攀爬纤维 × 平行纤维同步条件：只有突触前神经元在本步
+                     * 发放过（平行纤维活跃）的输入突触才接受误差信号，
+                     * 对应小脑 PF–PF/CF 的联合 LTD 条件。*/
+                    Neuron2* pre = &net->neurons[syn->pre_id];
+                    if (pre->is_spiking) {
+                        double ej = (pt == NT_MOTOR_OMEGA1) ? ev.e1 : ev.e2;
+                        double dir = tanh(post->pref_omega / 0.15);
+                        dw += net->hp.learning_rate * net->hp.error_gain * ej * dir * credit;
+                    }
                 }
+                syn->weight = clamp2(syn->weight + dw, WEIGHT_MIN, WEIGHT_MAX);
             }
         }
         #endif
@@ -584,8 +668,9 @@ void net2_tick(NetworkState2* net) {
                 n->membrane_potential = MEMBRANE_REST;
                 continue;
             }
-            /* 膜电位衰减 */
-            n->membrane_potential = n->membrane_potential * MEMBRANE_DECAY + MEMBRANE_REST * (1.0 - MEMBRANE_DECAY);
+            /* 膜电位衰减（v6：每神经元独立时间常数，默认 = MEMBRANE_DECAY） */
+            double md = n->membrane_decay;
+            n->membrane_potential = n->membrane_potential * md + MEMBRANE_REST * (1.0 - md);
             
             /* base current + 膜电位噪声：
              * 噪声让 WTA winner 每次都略有不同 → 探索不同方向 → 碰到正反馈就能增强权重！
@@ -656,7 +741,7 @@ void net2_tick(NetworkState2* net) {
                 for (int w = 0; w < WTA_K; w++) {
                     if (winners[w] < 0) continue;
                     Neuron2* wn = &net->neurons[base + winners[w]];
-                    double v = wn->membrane_potential - MEMBRANE_REST;
+                    double v = (wn->membrane_potential - MEMBRANE_REST) * wn->tuning_width;
                     if (v < 1e-6) v = 1e-6;
                     wsum += v * wn->pref_omega;
                     wtot += v;
@@ -767,18 +852,83 @@ void net2_tick(NetworkState2* net) {
     
     /* Step 5: 物理模拟一步 */
     arm_step(&net->arm, omega1_cmd, omega2_cmd);
-    
+
+    /* Step 5b: 攀爬纤维误差信号 —— 感觉目标误差 → 关节级运动指令误差
+     * 生物学对应：小脑攀爬纤维在运动进行中（而非试次结束）传递感觉预测
+     * 误差，诱导平行纤维–浦肯野细胞突触的定向 LTD，校准内部逆模型。
+     * 工程实现：用 Jacobian 转置（最速下降方向，天然避开求逆奇异）把末端
+     * 指向目标的单位向量映射成期望关节角速度 omega*，与实际解码 omega 的
+     * 差即为逐 tick、连续、有符号、方向性的误差。密度远高于稀疏到达奖励。
+     * 结果由 net2_inject_reward2 在本 tick 末随奖励一起入队，下一 tick 开头生效。*/
+    {
+        double t1 = net->arm.theta1, t2 = net->arm.theta2;
+        double s1 = sin(t1), c1 = cos(t1);
+        double s12 = sin(t1 + t2), c12 = cos(t1 + t2);
+        double J11 = -ARM_L1 * s1 - ARM_L2 * s12;
+        double J21 =  ARM_L1 * c1 + ARM_L2 * c12;
+        double J12 = -ARM_L2 * s12;
+        double J22 =  ARM_L2 * c12;
+        double dx = net->arm.target_x - net->arm.end_x;
+        double dy = net->arm.target_y - net->arm.end_y;
+        double d  = sqrt(dx * dx + dy * dy);
+        double ux = 0.0, uy = 0.0;
+        if (d > 1e-6) { ux = dx / d; uy = dy / d; }
+        double g1 = J11 * ux + J21 * uy;   /* J^T · u */
+        double g2 = J12 * ux + J22 * uy;
+        /* 接近目标时把期望速度收敛到 0，避免到达点附近持续抖动 */
+        double prox = (d < 0.15) ? d / 0.15 : 1.0;
+        double lam = (net->hp.cf_lambda > 0.0) ? net->hp.cf_lambda : 1.0;
+        double w1s = clamp2(0.5 * g1 / lam, -0.5, 0.5) * prox;
+        double w2s = clamp2(0.5 * g2 / lam, -0.5, 0.5) * prox;
+        net->cf_omega1_star = w1s;
+        net->cf_omega2_star = w2s;
+        net->cf_err1 = clamp2(w1s - omega1_cmd, -1.0, 1.0);
+        net->cf_err2 = clamp2(w2s - omega2_cmd, -1.0, 1.0);
+        /* 内部模型对误差的预期：EMA ~50 tick。注入的是 de = e - EMA(e)，
+         * 即「超出预期的那部分误差」，攀爬纤维在误差已被预测时沉默。 */
+        const double CF_EMA_ALPHA = 0.02;
+        net->cf_ema1 += CF_EMA_ALPHA * (net->cf_err1 - net->cf_ema1);
+        net->cf_ema2 += CF_EMA_ALPHA * (net->cf_err2 - net->cf_ema2);
+    }
+
     /* reward queue 已移到 tick 开头处理（修正了 1 tick 的时序错位） */
 }
 
-void net2_inject_reward2(NetworkState2* net, double r1, double r2, int delay_ticks) {
+void net2_get_cf_error(const NetworkState2* net, double* out4) {
+    if (!net || !out4) return;
+    out4[0] = net->cf_err1;
+    out4[1] = net->cf_err2;
+    out4[2] = net->cf_omega1_star;
+    out4[3] = net->cf_omega2_star;
+}
+
+void net2_inject_modulation(NetworkState2* net, double r1, double r2,
+                            double e1, double e2, double novelty,
+                            int delay_ticks) {
+    if (!net) return;
     int next = (net->queue_tail + 1) % QUEUE_SIZE;
     if (next == net->queue_head) return;  /* 队列满 */
-    net->reward_queue[net->queue_tail].reward_scalar = 0.5 * (r1 + r2);
-    net->reward_queue[net->queue_tail].r1 = r1;
-    net->reward_queue[net->queue_tail].r2 = r2;
-    net->reward_queue[net->queue_tail].delivery_tick = net->current_tick + delay_ticks;
+    RewardEvent2* ev = &net->reward_queue[net->queue_tail];
+    ev->reward_scalar = 0.5 * (r1 + r2);   /* 兼容字段，仅用于滑动基线 */
+    ev->r1 = r1;
+    ev->r2 = r2;
+    ev->e1 = e1;
+    ev->e2 = e2;
+    ev->novelty = novelty;
+    ev->delivery_tick = net->current_tick + delay_ticks;
     net->queue_tail = next;
+}
+
+void net2_inject_reward2(NetworkState2* net, double r1, double r2, int delay_ticks) {
+    if (!net) return;
+    /* 自动携带核心在本 tick 物理步之后算好的攀爬纤维误差；
+     * 惊讶度 = 当前奖励与滑动基线的偏差（乙酰胆碱通道）。
+     * 这样旧调用方（host / 可视化）无需改动即可获得多通道调制。 */
+    double nov = fabs(0.5 * (r1 + r2) - net->reward_baseline);
+    net2_inject_modulation(net, r1, r2,
+                           clamp2(net->cf_err1 - net->cf_ema1, -1.0, 1.0),
+                           clamp2(net->cf_err2 - net->cf_ema2, -1.0, 1.0),
+                           clamp2(nov, 0.0, 2.0), delay_ticks);
 }
 
 void net2_inject_reward(NetworkState2* net, double reward, int delay_ticks) {
@@ -933,6 +1083,27 @@ int net2_set_param(NetworkState2* net, const char* name, double value) {
         net->reward_baseline = 0.0;
         net->reward_hist_head = 0;
         net->reward_hist_count = 0;
+    } else if (b2_param_is(name, "error_gain")) {
+        if (value < 0.0 || value > 10.0) return -1;
+        hp->error_gain = value;
+    } else if (b2_param_is(name, "novelty_gain")) {
+        if (value < 0.0 || value > 10.0) return -1;
+        hp->novelty_gain = value;
+    } else if (b2_param_is(name, "cf_lambda")) {
+        if (value < 0.1 || value > 10.0) return -1;
+        hp->cf_lambda = value;
+    } else if (b2_param_is(name, "hetero_tau")) {
+        if (value < 0.0 || value > 1.0) return -1;
+        hp->hetero_tau = value;
+        apply_heterogeneity(net);
+    } else if (b2_param_is(name, "hetero_thresh")) {
+        if (value < 0.0 || value > 10.0) return -1;
+        hp->hetero_thresh = value;
+        apply_heterogeneity(net);
+    } else if (b2_param_is(name, "hetero_tune")) {
+        if (value < 0.0 || value > 1.0) return -1;
+        hp->hetero_tune = value;
+        apply_heterogeneity(net);
     } else {
         return -1;
     }
@@ -961,6 +1132,14 @@ double net2_get_param(const NetworkState2* net, const char* name) {
     B2_GET("reward_mod", net->use_reward_modulation);
     B2_GET("reward_baseline", net->reward_baseline);
     B2_GET("current_tick", net->current_tick);
+    B2_GET("error_gain", hp->error_gain);
+    B2_GET("novelty_gain", hp->novelty_gain);
+    B2_GET("cf_lambda", hp->cf_lambda);
+    B2_GET("hetero_tau", hp->hetero_tau);
+    B2_GET("hetero_thresh", hp->hetero_thresh);
+    B2_GET("hetero_tune", hp->hetero_tune);
+    B2_GET("cf_err1", net->cf_err1);
+    B2_GET("cf_err2", net->cf_err2);
 #undef B2_GET
     return NAN;
 }
@@ -979,6 +1158,12 @@ void net2_episode_reset(NetworkState2* net, double tx, double ty) {
     net->arm.reward = 1.0;
     net->decoded_omega1 = 0.0;
     net->decoded_omega2 = 0.0;
+    net->cf_err1 = 0.0;
+    net->cf_err2 = 0.0;
+    net->cf_omega1_star = 0.0;
+    net->cf_omega2_star = 0.0;
+    net->cf_ema1 = 0.0;
+    net->cf_ema2 = 0.0;
     net2_reset_ema();
     net2_set_target(net, tx, ty);
     for (i = 0; i < net->neuron_count; i++) {

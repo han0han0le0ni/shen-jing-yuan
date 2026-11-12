@@ -1,4 +1,4 @@
-﻿﻿/*
+/*
  * benchmark2_host.cpp - Benchmark-2 宿主测试驱动
  * 两关节虚拟臂到达任务
  *
@@ -60,6 +60,14 @@ struct B2Config {
     double arrive_radius = 0.15;  /* 碰到目标的判定半径 */
     double arrive_bonus  = 1.0;   /* 首次碰到目标的基础奖励 */
     double speed_bonus   = 5.0;   /* 速度评分系数（按剩余步数比例给分） */
+
+    /* v6：三因子调制 / 攀爬纤维误差 / 异构群体编码（默认全关 = 旧版） */
+    double error_gain    = 0.0;   /* 小脑攀爬纤维：关节级有符号误差增益 */
+    double novelty_gain  = 0.0;   /* 乙酰胆碱：惊讶度放大学习率 */
+    double cf_lambda     = 1.0;   /* 逆运动学期望速度缩放 */
+    double hetero_tau    = 0.0;   /* 运动层膜时间常数对数正态 sigma */
+    double hetero_thresh = 0.0;   /* 运动层阈值高斯 sigma (mV) */
+    double hetero_tune   = 0.0;   /* 运动层调谐宽度对数正态 sigma */
 };
 
 static unsigned int h_rand;
@@ -143,6 +151,12 @@ int main(int argc, char* argv[]) {
         else if (a == "--arrive-radius")    nextf(cfg.arrive_radius);
         else if (a == "--arrive-bonus")     nextf(cfg.arrive_bonus);
         else if (a == "--speed-bonus")      nextf(cfg.speed_bonus);
+        else if (a == "--error-gain")       nextf(cfg.error_gain);
+        else if (a == "--novelty-gain")     nextf(cfg.novelty_gain);
+        else if (a == "--cf-lambda")        nextf(cfg.cf_lambda);
+        else if (a == "--hetero-tau")       nextf(cfg.hetero_tau);
+        else if (a == "--hetero-thresh")    nextf(cfg.hetero_thresh);
+        else if (a == "--hetero-tune")      nextf(cfg.hetero_tune);
         else if (a == "--help" || a == "-h") {
             printf("Usage: %s [--input N --hidden N --motor N --episodes N --seed N --out FILE]\n"
                    "       [--score-horizon N (速度评分参考步数，不终止本轮；--ticks 为旧别名)]\n"
@@ -155,7 +169,11 @@ int main(int argc, char* argv[]) {
                    "       [--no-reward-baseline --tau-trace F --trace-clamp F]\n"
                    "       [--speed-reward (默认：每步成本 + 首达奖励 + 碰到即结算重来)]\n"
                    "       [--no-speed-reward (旧对照：固定步数、不结算)]\n"
-                   "       [--step-cost F --arrive-radius F --arrive-bonus F --speed-bonus F]\n", argv[0]);
+                   "       [--step-cost F --arrive-radius F --arrive-bonus F --speed-bonus F]\n"
+                   "       [--error-gain F  攀爬纤维：关节级有符号运动误差增益(默认0=关)]\n"
+                   "       [--novelty-gain F 乙酰胆碱：惊讶度放大学习率(默认0=关)]\n"
+                   "       [--cf-lambda F    逆运动学期望速度缩放(默认1.0)]\n"
+                   "       [--hetero-tau F --hetero-thresh F --hetero-tune F  运动层异质化]\n", argv[0]);
             return 0;
         }
     }
@@ -205,7 +223,8 @@ int main(int argc, char* argv[]) {
            cfg.input_n, cfg.hidden_n, cfg.motor1_n, cfg.motor2_n,
            cfg.episodes, cfg.score_horizon, cfg.max_ticks_per_ep, cfg.seed);
     
-    NetworkState2 net;
+    /* 调制队列含 8192 个事件（v6 每条 6 个 double），放静态区避免大栈帧 */
+    static NetworkState2 net;
     if (net2_init(&net, cfg.input_n, cfg.hidden_n, cfg.motor1_n, cfg.motor2_n,
                   cfg.avg_conn, cfg.seed) != 0) {
         fprintf(stderr, "Init failed\n");
@@ -222,6 +241,29 @@ int main(int argc, char* argv[]) {
     printf("Mode: preset=%s psp=%.2f wta_k=%d decode=%d reward=%d baseline=%d tau=%.0f clamp=%.2f\n",
            cfg.preset.c_str(), cfg.psp_factor, cfg.wta_k, cfg.decode_mode,
            cfg.reward_mode, cfg.use_reward_baseline, cfg.tau_trace, cfg.trace_clamp);
+
+    /* v6：三因子调制通道与运动层异质化。走 set_param 以便复用边界校验，
+     * 并让 hetero_* 立即重建运动层的异质分布。默认值全 0 = 旧版行为。 */
+    struct V6Param { const char* name; double v; };
+    const V6Param v6[] = {
+        {"error_gain", cfg.error_gain}, {"novelty_gain", cfg.novelty_gain},
+        {"cf_lambda", cfg.cf_lambda},  {"hetero_tau", cfg.hetero_tau},
+        {"hetero_thresh", cfg.hetero_thresh},         {"hetero_tune", cfg.hetero_tune},
+    };
+    for (const auto& p : v6) {
+        if (net2_set_param(&net, p.name, p.v) != 0) {
+            fprintf(stderr, "Invalid v6 param %s = %g\n", p.name, p.v);
+            net2_destroy(&net);
+            return 1;
+        }
+    }
+    if (cfg.error_gain > 0.0 || cfg.novelty_gain > 0.0 ||
+        cfg.hetero_tau > 0.0 || cfg.hetero_thresh > 0.0 || cfg.hetero_tune > 0.0) {
+        printf("v6: error_gain=%.3f novelty_gain=%.3f cf_lambda=%.2f "
+               "hetero(tau=%.3f thresh=%.3f tune=%.3f)\n",
+               cfg.error_gain, cfg.novelty_gain, cfg.cf_lambda,
+               cfg.hetero_tau, cfg.hetero_thresh, cfg.hetero_tune);
+    }
     if (cfg.speed_mode) {
         printf("Speed: ON cost=%.4f radius=%.4f bonus=%.2f speed_bonus=%.2f\n",
                cfg.step_cost, cfg.arrive_radius, cfg.arrive_bonus, cfg.speed_bonus);
@@ -263,6 +305,10 @@ int main(int argc, char* argv[]) {
                 cfg.preset.c_str(), cfg.decode_mode, cfg.wta_k, cfg.reward_mode);
         fprintf(mf, "  \"use_reward_baseline\": %d, \"tau_trace\": %.1f, \"trace_clamp\": %.2f,\n",
                 cfg.use_reward_baseline, cfg.tau_trace, cfg.trace_clamp);
+        fprintf(mf, "  \"error_gain\": %.4f, \"novelty_gain\": %.4f, \"cf_lambda\": %.3f,\n"
+                    "  \"hetero_tau\": %.4f, \"hetero_thresh\": %.4f, \"hetero_tune\": %.4f,\n",
+                cfg.error_gain, cfg.novelty_gain, cfg.cf_lambda,
+                cfg.hetero_tau, cfg.hetero_thresh, cfg.hetero_tune);
         fprintf(mf, "  \"el_trace\": %d, \"reward_mod\": %d,\n",
                 net.use_eligibility_trace, net.use_reward_modulation);
         fprintf(mf, "  \"speed_mode\": %d, \"step_cost\": %.4f, \"arrive_radius\": %.4f,\n",
