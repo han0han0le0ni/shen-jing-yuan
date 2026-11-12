@@ -488,6 +488,10 @@ class SimEngine:
         self._teacher_decay = 0.97     # 逐步放手退火系数
         self._teacher_anneal = False
 
+        # 引导诊断：每 tick 记录一次，供「引导监控」面板实时读取
+        self.guidance = {}
+        self.guidance_hist = deque(maxlen=360)
+
     def drain_trail(self):
         """取走本轮循环内每个 tick 的末端点（供渲染层一次性画完）"""
         if not self._trail_buf:
@@ -541,9 +545,12 @@ class SimEngine:
     @property
     def _teacher_capable(self):
         """只有能承载 motor_override 的向量化后端才支持引导（C DLL 不认）。"""
+        # CUDA 路径的运动指令由 _k_arm kernel 直接生成，完全不读 motor_override，
+        # 因此只有 numpy 向量化后端能真正承载引导。
         return (self._teacher is not None
                 and hasattr(self.be, "motor_override")
-                and hasattr(self.be, "_decode_omega"))
+                and hasattr(self.be, "_decode_omega")
+                and not bool(getattr(self.be, "_on_gpu", False)))
 
     def _net_output(self):
         """本 tick 网络原始解码（用上一 tick 的脉冲，不含引导、不含噪声）。"""
@@ -562,13 +569,43 @@ class SimEngine:
                 "target_x": tx, "target_y": ty,
                 "L1": L1, "L2": L2, "max_omega": MAX_OMEGA}
 
+    def _guidance_backend(self):
+        if getattr(self.be, "_on_gpu", False):
+            return "CUDA"
+        return "向量化·12核" if hasattr(self.be, "motor_override") else "C DLL"
+
+    def _record_guidance(self, net, cmd, final, reasons):
+        ex, ey, tx, ty, _ = self.be.get_arm()
+        rec = {
+            "tick": int(getattr(self.be, "tick_count", 0)),
+            "g": float(self._teacher_g),
+            "teacher": getattr(self._teacher, "name", "") if self._teacher else "",
+            "net": net or (0.0, 0.0),
+            "cmd": cmd or (0.0, 0.0),
+            "final": final or (0.0, 0.0),
+            "dist": float(math.hypot(ex - tx, ey - ty)),
+            "effective": bool(self._teacher is not None and not reasons),
+            "reason": "; ".join(reasons),
+            "backend": self._guidance_backend(),
+        }
+        self.guidance = rec
+        self.guidance_hist.append(rec)
+
     def _apply_teacher(self):
         """若启用老师：计算 ω=(1-G)·网络 + G·老师，经后端 motor_override 注入。
-        G=0 时退化为纯网络自主解码。C DLL 后端不认 motor_override，自动跳过。"""
+        G=0 时退化为纯网络自主解码。C DLL / CUDA 后端不认 motor_override。"""
         be = self.be
         if not self._teacher_capable:
             if hasattr(be, "motor_override"):
                 be.motor_override = None
+            reasons = []
+            if self._teacher is None:
+                reasons.append("未选择学习接口")
+            if not hasattr(be, "motor_override"):
+                reasons.append("当前后端不提供注入钩子")
+            if getattr(be, "_on_gpu", False):
+                reasons.append("CUDA kernel 不消费 motor_override，请切到「向量化 · 12 核」")
+            self._record_guidance(None, None, None, reasons)
             return
         w1, w2 = self._net_output()
         st = self._teacher_state()
@@ -577,6 +614,7 @@ class SimEngine:
         o1 = max(-MAX_OMEGA, min(MAX_OMEGA, (1.0 - G) * w1 + G * g1))
         o2 = max(-MAX_OMEGA, min(MAX_OMEGA, (1.0 - G) * w2 + G * g2))
         be.motor_override = (o1, o2)
+        self._record_guidance((w1, w2), (g1, g2), (o1, o2), [])
 
     def train_tick(self):
         """一个仿真步：推进物理 → 计算即时奖励 → 注入 → 判定结算/重来"""
@@ -1428,6 +1466,12 @@ class MainWindow(QMainWindow):
         self._last_episode = -1        # 轨迹按回合清空：检测 episode 变化
         self._teacher_forced_vec = False   # 是否因启用老师而强制切到向量化后端
         self._results_win = None           # 「基准成果」窗口（懒创建）
+        self._guidance_win = None          # 「引导监控」窗口（懒创建）
+        self._chat_win = None              # 「AI 对话」窗口（懒创建，LM Studio）
+        self._snapshot_win = None          # 「训练存档」窗口（懒创建）
+        self._dialog_win = None            # 「对话训练」探针窗口（懒创建）
+        self._training_flags = {"auto_save": True, "auto_load": True}
+        self._autoload_done = False        # 启动后只自动恢复一次
 
         # 学习接口插件：自动发现 + 目录热加载
         self._plugins, self._plugin_errors = discover()
@@ -1652,6 +1696,30 @@ class MainWindow(QMainWindow):
         b.setToolTip("打开 Benchmark-1 延迟扫描与消融结果窗口")
         b.clicked.connect(self._show_results)
         hl.addWidget(b)
+        b = QPushButton("引导监控")
+        b.setObjectName("Ghost")
+        b.setToolTip("实时查看老师指令、网络解码与最终注入（需选学习接口）")
+        b.clicked.connect(self._show_guidance)
+        hl.addWidget(b)
+        b = QPushButton("AI 对话")
+        b.setObjectName("Ghost")
+        b.setToolTip("连接本机 LM Studio：对话、连接自检、接口设置（与老师插件共用）")
+        b.clicked.connect(self._show_chat)
+        hl.addWidget(b)
+        b = QPushButton("训练存档")
+        b.setObjectName("Ghost")
+        b.setToolTip("保存 / 恢复学到的突触权重与训练进度，避免刷新后归零")
+        b.clicked.connect(self._show_snapshots)
+        hl.addWidget(b)
+        b = QPushButton("对话训练")
+        b.setObjectName("Ghost")
+        b.setToolTip("B3 教学探针：文本→脉冲→回应标签→评分奖励→R-STDP（不计入验收）")
+        b.clicked.connect(self._show_dialog)
+        hl.addWidget(b)
+        self.lbl_snapshot = QLabel("存档：—")
+        self.lbl_snapshot.setObjectName("Perf")
+        self.lbl_snapshot.setToolTip("训练快照状态（退出自动保存、启动自动载入）")
+        hl.addWidget(self.lbl_snapshot)
         self.lbl_trial = QLabel("第 0 轮 · 到达 0")
         self.lbl_trial.setObjectName("Perf")
         self.lbl_trial.setToolTip("累计完成轮次 / 碰到目标次数 / 本轮步数")
@@ -1794,6 +1862,122 @@ class MainWindow(QMainWindow):
         self._results_win.show()
         self._results_win.raise_()
         self._results_win.activateWindow()
+
+    def _show_guidance(self):
+        """打开实时引导监控（老师指令 / 网络解码 / 最终注入）。"""
+        try:
+            from guidance_monitor import GuidanceWindow
+        except ImportError:
+            sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+            from guidance_monitor import GuidanceWindow
+        if self._guidance_win is None:
+            self._guidance_win = GuidanceWindow(
+                self.engine, theme=self.T,
+                set_g_callback=lambda v: self.spin_teacher_g.setValue(v))
+        self._guidance_win.show()
+        self._guidance_win.raise_()
+        self._guidance_win.activateWindow()
+
+    def _show_chat(self):
+        """打开本地 LM Studio 对话窗口（与蒸馏老师插件共用接口配置）。"""
+        try:
+            from chat_panel import ChatWindow
+        except ImportError:
+            sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+            from chat_panel import ChatWindow
+        if self._chat_win is None:
+            self._chat_win = ChatWindow(self.engine, theme=self.T)
+        self._chat_win.show()
+        self._chat_win.raise_()
+        self._chat_win.activateWindow()
+
+    def _show_snapshots(self):
+        """打开训练存档窗口：保存/恢复权重，避免刷新后和没训练过一样。"""
+        try:
+            from training_panel import SnapshotWindow
+        except ImportError:
+            sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+            from training_panel import SnapshotWindow
+        if self._snapshot_win is None:
+            self._snapshot_win = SnapshotWindow(
+                self.engine, theme=self.T, flags=self._training_flags,
+                on_change=self._snapshot_status, extra=self._snapshot_extra())
+        self._snapshot_win.refresh()
+        self._snapshot_win.show()
+        self._snapshot_win.raise_()
+        self._snapshot_win.activateWindow()
+
+    def _show_dialog(self):
+        """打开 B3 对话训练探针（独立闭环，不改 B2 运动网络）。"""
+        try:
+            import dialog_lab
+        except ImportError:
+            sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+            import dialog_lab
+        if self._dialog_win is None:
+            self._dialog_win = dialog_lab.DialogLabWindow(
+                dialog_lab.DialogEngine(), theme=self.T)
+        self._dialog_win.show()
+        self._dialog_win.raise_()
+        self._dialog_win.activateWindow()
+
+    def _snapshot_status(self, text):
+        self.lbl_snapshot.setText("存档：" + text)
+
+    def _snapshot_extra(self):
+        return {"preset": self.combo_preset.currentText(),
+                "seed": int(self.spin_seed.value()),
+                "device": DEVICES[max(0, self.combo_dev.currentIndex())][1]}
+
+    def _import_store(self):
+        try:
+            import training_store
+        except ImportError:
+            sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+            import training_store
+        return training_store
+
+    def _autoload_training(self):
+        """启动后第一次重建网络时，把上次保存的权重写回来。"""
+        store = self._import_store()
+        if not self._training_flags.get("auto_load", True):
+            return
+        if store.describe() is None:
+            self._autoload_done = True
+            self._snapshot_status("无存档")
+            return
+        try:
+            m = store.load(self.engine)
+            self._autoload_done = True
+            self._sync_teacher_g()
+            self._last_snap = self.engine.snapshot()
+            self._refresh_frame(self._last_snap)
+            self._snapshot_status("已恢复 · 第 %d 轮 · G=%.2f"
+                                  % (m["episode"], m["teacher_g"]))
+        except store.SnapshotError as exc:
+            msg = str(exc)
+            # 默认后端是 C DLL（只读权重）：留着等用户切到向量化后端再自动重试
+            if "不提供权重写入接口" not in msg:
+                self._autoload_done = True
+            self._snapshot_status("未恢复：" + msg[:40])
+
+    def _autosave_training(self):
+        store = self._import_store()
+        if not self._training_flags.get("auto_save", True):
+            return
+        try:
+            m = store.save(self.engine, extra=self._snapshot_extra())
+            self._snapshot_status("已保存 · 第 %d 轮" % m["episode"])
+        except store.SnapshotError:
+            pass   # C DLL 后端不支持写权重；存档窗口里会给出明确提示
+
+    def _sync_teacher_g(self):
+        """把引擎侧的 G（含退火结果）回写主卡片，避免旧值把退火进度覆盖。"""
+        g = float(self.engine._teacher_g)
+        if abs(self.spin_teacher_g.value() - g) > 1e-9:
+            self.spin_teacher_g.blockSignals(True)
+            self.spin_teacher_g.setValue(g)
+            self.spin_teacher_g.blockSignals(False)
 
     def _build_teacher_card(self):
         """学习接口卡片：只列出自动检测到的插件；无插件时整卡隐藏。"""
@@ -1980,15 +2164,17 @@ class MainWindow(QMainWindow):
         self.engine._teacher_anneal = self.chk_anneal.isChecked()
         self._active_plugin_id = pid
         self._teacher_forced_vec = False
-        if DEVICES[self.combo_dev.currentIndex()][1] == "cdll":
+        # 只有 numpy 向量化后端真正消费 motor_override；C DLL 与 CUDA 都切过去
+        vec_idx = next((i for i, d in enumerate(DEVICES) if d[1] == "numpy"), 1)
+        if self.combo_dev.currentIndex() != vec_idx:
             self._teacher_forced_vec = True
-            idx_vec = 0 if DEVICES[0][1] == "cuda" else 1
-            self.combo_dev.setCurrentIndex(idx_vec)
-            self._teacher_status("老师：%s · G=%.2f（已切向量化后端）" %
+            self.combo_dev.setCurrentIndex(vec_idx)
+            self._teacher_status("老师：%s · G=%.2f（已切向量化·12核）" %
                                  (obj.name, self.engine._teacher_g))
         else:
             self._teacher_status("老师：%s · G=%.2f" %
                                  (obj.name, self.engine._teacher_g))
+        self.engine._apply_teacher()   # 立即产生首条引导诊断，面板打开即有数据
 
     def _rebuild_plugin_params(self):
         """只给当前插件声明过的参数生成控件；无参数则整个区域隐藏。"""
@@ -2187,6 +2373,8 @@ class MainWindow(QMainWindow):
         self.chip_dev.setText(f"后端 {self.engine.name}")
         self._refresh_badge()
         self._refresh_frame(self._last_snap)
+        if not self._autoload_done:
+            self._autoload_training()
 
     def _toggle_play(self):
         self._pause() if self.is_playing else self._play()
@@ -2309,10 +2497,12 @@ class MainWindow(QMainWindow):
         self.metrics["total"].set_value(f"{self._total_reward:+.1f}")
         self.metrics["episode"].set_value(f"{self.engine.episode}")
         self.metrics["trial"].set_value(f"{self.engine.trial_tick}")
+        self._sync_teacher_g()
         if self.engine._teacher is not None:
             self.lbl_teacher_status.setText(
-                "老师：%s · G=%.2f%s" % (
+                "老师：%s · G=%.2f · 到达 %d 次%s" % (
                     self.engine._teacher.name, self.engine._teacher_g,
+                    self.engine.arrivals,
                     " · 退火中" if self.engine._teacher_anneal else ""))
         self.chart.push(r, dist, sp / len(mem) if len(mem) else 0.0)
         self._update_trial_label()
@@ -2320,6 +2510,7 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         self.gui_timer.stop()
         self._pause()
+        self._autosave_training()   # 退出前把学到的权重落盘，下次启动自动恢复
         self.engine.destroy()
         super().closeEvent(event)
 
