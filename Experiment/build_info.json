@@ -1,0 +1,25 @@
+{
+    "built_at":  "2026-11-12T19:31:41",
+    "compiler":  "gcc.exe (MinGW-W64 x86_64-ucrt-posix-seh, built by Brecht Sanders, r4) 16.1.0",
+    "macros":  "defaults from headers: ELIGIBILITY_TRACE_ENABLE=1, REWARD_MODULATION_ENABLE=1",
+    "commands":  [
+                     "gcc -O2 -Wall -Wextra -c \u003ccore\u003e.c -o \u003cobj\u003e.o",
+                     "g++ -O2 -Wall -Wextra -c \u003chost\u003e.cpp -o \u003cobj\u003e.o",
+                     "g++ \u003ccore\u003e.o \u003chost\u003e.o -o \u003cexe\u003e -lm",
+                     "gcc -O2 -Wall -Wextra -shared brain_b2/benchmark2_core.c -o b2_core.dll -lm"
+                 ],
+    "sources":  {
+                    "host\\benchmark1_host.cpp":  "581186860711dfec4671519f625b8aba7afbae311dbc2ac69a7d8e14614481c6",
+                    "brain_b2\\benchmark2_core.h":  "e900d9399637cbba86dfac2033a06a8c32a308d99945268cef8743722be5916e",
+                    "host_b2\\benchmark2_host.cpp":  "9d8bafe6fe160f618000f655b59a4463fbd3f1c78db9f65389daf4ebbec49589",
+                    "brain\\benchmark1_core.c":  "8c5a9d871071ce2175a64c0d52771e738faaa4f5a2824ca83c0e7d385803d8eb",
+                    "brain_b2\\benchmark2_core.c":  "a20418e39e22cea53dfd366a2d339f81d7c7b5e93b9af9f7cf904654c046dd4a",
+                    "brain\\benchmark1_core.h":  "9cc38e9e035bbde9cf0444c56ba008bc090c5c3424c912d1b751c8216aec60ce"
+                },
+    "artifacts":  {
+                      "benchmark1.exe":  "26fd52739943c70c83abe4c2013dd81cdc19dc3c6706db4e99248e7be72120c4",
+                      "b2_core.dll":  "2f5269c49c1113b12c511f0a2ccd36d774b0da5eacb43c97cb3997bf7b6d8f63",
+                      "benchmark2.exe":  "fb2bc257b9812d1ab3f36a48a66bd4110d61e3479f04be0d02c5ba4ca7c7b3f3",
+                      "b2_core.o":  "849b35bd5fdd2a26ae97842e238961a69b4b0fbbfcf2bab4c18d71134ca18c43"
+                  }
+}

@@ -1,12 +1,16 @@
 === Benchmark-1 Diagnostic Log ===
-Timestamp: Nov  9 2026 16:36:34
-Config: S_A=50 S_B=50 H=400 O_A=25 O_B=25 Delay=200 Trials=1000 Seed=12345
+Timestamp: Nov 12 2026 19:31:39
+Config: S_A=50 S_B=50 H=400 O_A=25 O_B=25 Delay=200 Trials=300 Seed=12345
 El Trace: 1, Reward Mod: 1
 
-Weight stats: count=4000 mean=0.2195 min=0.0504 max=0.4012
-Trace stats: nonzero=2243/4000 mean=0.8730 min=0.2454 max=2.1223
+Weight stats: count=4000 mean=0.2204 min=0.0504 max=0.4114
+Trace stats: K=3 nonzero=342/4000 mean=0.1816 min=0.0153 max=0.6582
+  scale[0]: tau=20.0 alpha=0.3333 lambda=0.951229 nonzero=324 mean=0.1486
+  scale[1]: tau=100.0 alpha=0.3333 lambda=0.990050 nonzero=342 mean=0.1515
+  scale[2]: tau=500.0 alpha=0.3333 lambda=0.998002 nonzero=342 mean=0.2524
 
 Hyperparameters:
   tau_stdp=50.0, tau_trace=200.0, lambda_trace=0.995012
+  trace_k=3, tau_k=[20.0, 100.0, 500.0], alpha=[0.3333, 0.3333, 0.3333]
   stdp_a_plus=0.10, stdp_a_minus=0.12, lr=0.0050
   baseline_window=100
