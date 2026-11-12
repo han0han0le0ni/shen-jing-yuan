@@ -44,3 +44,6 @@ __pycache__/
 
 # 构建备份目录（源码副本，不入库）
 Experiment/backup_*/
+
+# B1 扫描原始数据（可复现：tools/b1_sweep.ps1）
+Experiment/data/b1_m1/

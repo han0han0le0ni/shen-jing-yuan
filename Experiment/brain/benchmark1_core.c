@@ -179,14 +179,14 @@ int net_init(NetworkState* net, int sensory_a, int sensory_b,
         }
     }
     
-    /* === 隐藏左半 → 输出A (65%) + 输出B (35%) === */
+    /* === 隐藏左半 → 输出A/B（初始 50/50，无预埋正确映射） === */
     for (i = 0; i < hidden_mid; i++) {
         int pre = sensory_a + sensory_b + i;
         int out_base = sensory_a + sensory_b + hidden;
         
         for (int k = 0; k < K_feedforward && net->synapse_count < est_synapses; k++) {
             int post;
-            if (rand_uniform() < 0.65) {
+            if (rand_uniform() < 0.5) {
                 post = out_base + (int)(rand_uniform() * output_a);
             } else {
                 post = out_base + output_a + (int)(rand_uniform() * output_b);
@@ -202,14 +202,14 @@ int net_init(NetworkState* net, int sensory_a, int sensory_b,
         }
     }
     
-    /* === 隐藏右半 → 输出A (35%) + 输出B (65%) === */
+    /* === 隐藏右半 → 输出A/B（初始 50/50） === */
     for (i = hidden_mid; i < hidden; i++) {
         int pre = sensory_a + sensory_b + i;
         int out_base = sensory_a + sensory_b + hidden;
         
         for (int k = 0; k < K_feedforward && net->synapse_count < est_synapses; k++) {
             int post;
-            if (rand_uniform() < 0.35) {
+            if (rand_uniform() < 0.5) {
                 post = out_base + (int)(rand_uniform() * output_a);
             } else {
                 post = out_base + output_a + (int)(rand_uniform() * output_b);
@@ -227,13 +227,30 @@ int net_init(NetworkState* net, int sensory_a, int sensory_b,
     
     /* 超参数默认值 */
     net->hp.tau_stdp = 50.0;    /* STDP时间常数 (ticks) */
-    net->hp.tau_trace = 200.0;  /* 资格迹时间常数 ≈ 奖励延迟D，保证信用分配有效 */
+    net->hp.tau_trace = 200.0;  /* 单尺度回退时间常数 */
     net->hp.lambda_trace = exp(-1.0 / net->hp.tau_trace);
+
+    /* 多尺度资格迹（M1）：K=3，tau = 20/100/500，alpha = 1/K。
+     * 单尺度消融用 trace_k=1 + tau_trace_k[0]=200 复现旧行为。 */
+    net->hp.trace_k = 3;
+    {
+        const double taus[3] = { 20.0, 100.0, 500.0 };
+        int k;
+        for (k = 0; k < 3; k++) {
+            net->hp.tau_trace_k[k] = taus[k];
+            net->hp.lambda_trace_k[k] = exp(-1.0 / taus[k]);
+            net->hp.trace_alpha[k] = 1.0 / 3.0;
+        }
+    }
+
     net->hp.stdp_a_plus = 0.1;
     net->hp.stdp_a_minus = 0.12;
     net->hp.learning_rate = 0.005;  /* 很小的学习率，慢学习放大微弱偏向 */
     net->hp.weight_decay_lambda = 1e-5;
     net->hp.reward_baseline_window = 100;
+    /* PSP 因子必须让输出层处于亚阈值区，否则权重变化不影响发放，
+     * 学习对投票无效（M1 诊断：PSP=25 时输出饱和，准确率恒 46.7%）。 */
+    net->hp.psp_factor = 10.0;
     
     /* 消融开关初始化 */
     #if ELIGIBILITY_TRACE_ENABLE
@@ -276,8 +293,32 @@ void net_destroy(NetworkState* net) {
  * ============================================================ */
 void net_set_hyperparams(NetworkState* net, HyperParams* hp) {
     net->hp = *hp;
+
+    /* 归一化多尺度参数，容忍外部只填部分字段 */
+    if (net->hp.trace_k < 1) net->hp.trace_k = 1;
+    if (net->hp.trace_k > 3) net->hp.trace_k = 3;
     net->hp.lambda_trace = exp(-1.0 / net->hp.tau_trace);
-    
+    {
+        int k;
+        for (k = 0; k < 3; k++) {
+            if (net->hp.tau_trace_k[k] <= 0.0) net->hp.tau_trace_k[k] = net->hp.tau_trace;
+            net->hp.lambda_trace_k[k] = exp(-1.0 / net->hp.tau_trace_k[k]);
+            if (net->hp.trace_alpha[k] < 0.0) net->hp.trace_alpha[k] = 0.0;
+        }
+        /* alpha 必须归一到 1：否则 K=1 时沿用默认 1/3，信用被暗削 3 倍 */
+        double asum = 0.0;
+        for (k = 0; k < net->hp.trace_k; k++) asum += net->hp.trace_alpha[k];
+        if (asum <= 0.0 || fabs(asum - 1.0) > 1e-6) {
+            if (asum <= 0.0) {
+                for (k = 0; k < net->hp.trace_k; k++)
+                    net->hp.trace_alpha[k] = 1.0 / (double)net->hp.trace_k;
+            } else {
+                for (k = 0; k < net->hp.trace_k; k++)
+                    net->hp.trace_alpha[k] /= asum;
+            }
+        }
+    }
+
     /* 重新分配奖励历史缓冲（如果窗口变了） */
     if (net->reward_history) free(net->reward_history);
     net->reward_history = (double*)calloc(net->hp.reward_baseline_window, sizeof(double));
@@ -301,7 +342,7 @@ static void update_neurons(NetworkState* net) {
         Neuron* post = &net->neurons[net->synapses[s].post_id];
         
         if (pre->is_spiking) {
-            post->membrane_potential += net->synapses[s].weight * PSP_FACTOR;
+            post->membrane_potential += net->synapses[s].weight * net->hp.psp_factor;
         }
     }
     
@@ -335,6 +376,36 @@ static void update_neurons(NetworkState* net) {
 }
 
 /* ============================================================
+ * 输出层竞争：本 tick 发放多的一侧抑制另一侧。
+ * 没有竞争时 A/B 会同时持续发放，投票只反映初始随机权重，
+ * 奖励调制无法形成可测偏好（M1 诊断结论）。
+ * ============================================================ */
+static void apply_output_competition(NetworkState* net) {
+    int i, a_cnt = 0, b_cnt = 0;
+    const double inh = 6.0;
+    const double floor_v = MEMBRANE_REST - 20.0;
+
+    for (i = 0; i < net->neuron_count; i++) {
+        if (!net->neurons[i].is_spiking) continue;
+        if (net->neurons[i].type == NT_OUTPUT_A) a_cnt++;
+        else if (net->neurons[i].type == NT_OUTPUT_B) b_cnt++;
+    }
+    if (a_cnt == b_cnt) return;
+
+    for (i = 0; i < net->neuron_count; i++) {
+        Neuron* n = &net->neurons[i];
+        if (n->is_spiking) continue;
+        if (a_cnt > b_cnt && n->type == NT_OUTPUT_B) {
+            n->membrane_potential -= inh;
+            if (n->membrane_potential < floor_v) n->membrane_potential = floor_v;
+        } else if (b_cnt > a_cnt && n->type == NT_OUTPUT_A) {
+            n->membrane_potential -= inh;
+            if (n->membrane_potential < floor_v) n->membrane_potential = floor_v;
+        }
+    }
+}
+
+/* ============================================================
  * STDP核计算
  * ============================================================ */
 static double compute_stdp_kernel(NetworkState* net, double delta_t) {
@@ -347,6 +418,26 @@ static double compute_stdp_kernel(NetworkState* net, double delta_t) {
     }
     return 0.0;
 }
+
+/* ============================================================
+ * 惰性结算：把总迹推进到当前 tick（奖励到达/诊断时调用）
+ * ============================================================ */
+#if ELIGIBILITY_TRACE_ENABLE
+static double synapse_total_credit(NetworkState* net, Synapse* syn) {
+    int k;
+    int delta_tick = net->current_tick - syn->last_stdp_tick;
+    if (delta_tick > 0) {
+        for (k = 0; k < net->hp.trace_k; k++)
+            syn->e[k] *= pow(net->hp.lambda_trace_k[k], (double)delta_tick);
+        syn->last_stdp_tick = net->current_tick;
+    }
+    double total = 0.0;
+    for (k = 0; k < net->hp.trace_k; k++)
+        total += net->hp.trace_alpha[k] * syn->e[k];
+    syn->eligibility_trace = total;
+    return total;
+}
+#endif
 
 /* ============================================================
  * 资格迹更新（事件驱动，仅处理有发放的突触）
@@ -362,11 +453,12 @@ static void update_eligibility_traces(NetworkState* net) {
         /* 仅当突触前或突触后神经元当前tick发放时处理（事件驱动） */
         if (!pre->is_spiking && !post->is_spiking) continue;
         
-        /* 惰性衰减：按时间差计算衰减量 */
+        /* 多尺度惰性衰减：每个尺度按自己的 tau 批量结算 */
         int delta_tick = net->current_tick - syn->last_stdp_tick;
         if (delta_tick > 1) {
-            /* 批量衰减（用lambda_trace^delta_tick近似） */
-            syn->eligibility_trace *= pow(net->hp.lambda_trace, (double)delta_tick - 1.0);
+            int kk;
+            for (kk = 0; kk < net->hp.trace_k; kk++)
+                syn->e[kk] *= pow(net->hp.lambda_trace_k[kk], (double)delta_tick - 1.0);
         }
         syn->last_stdp_tick = net->current_tick;
         
@@ -386,15 +478,30 @@ static void update_eligibility_traces(NetworkState* net) {
         
         #if ELIGIBILITY_TRACE_ENABLE
         if (net->use_eligibility_trace) {
-            syn->eligibility_trace += stdp_val;
-            /* 防止资格迹无限增长：用指数截断 */
-            if (syn->eligibility_trace > 5.0) syn->eligibility_trace = 5.0;
-            if (syn->eligibility_trace < -5.0) syn->eligibility_trace = -5.0;
+            int kk;
+            for (kk = 0; kk < net->hp.trace_k; kk++) {
+                syn->e[kk] += stdp_val;
+                if (syn->e[kk] > 5.0) syn->e[kk] = 5.0;
+                if (syn->e[kk] < -5.0) syn->e[kk] = -5.0;
+            }
+            /* 切换 K 后清掉多余尺度，避免旧迹残留 */
+            for (kk = net->hp.trace_k; kk < 3; kk++) syn->e[kk] = 0.0;
+
+            double total = 0.0;
+            for (kk = 0; kk < net->hp.trace_k; kk++)
+                total += net->hp.trace_alpha[kk] * syn->e[kk];
+            syn->eligibility_trace = total;
         } else {
-            /* 消融：不累积资格迹（权重更新时用固定值） */
+            /* 消融：不累积资格迹 */
+            int kk;
+            for (kk = 0; kk < 3; kk++) syn->e[kk] = 0.0;
             syn->eligibility_trace = 0.0;
         }
         #else
+        {
+            int kk;
+            for (kk = 0; kk < 3; kk++) syn->e[kk] = 0.0;
+        }
         syn->eligibility_trace = 0.0;
         #endif
     }
@@ -447,12 +554,22 @@ static void process_reward_queue(NetworkState* net) {
             int s;
             for (s = 0; s < net->synapse_count; s++) {
                 Synapse* syn = &net->synapses[s];
+
+                /* 只把信用分配给实际被选中的输出输入突触。
+                 * 全局奖励会同时增强正确与错误通路，导致权重整体缩放而非偏好形成。 */
+                if (event.winner != 0) {
+                    NeuronType pt = net->neurons[syn->post_id].type;
+                    int match = (event.winner == 1 && pt == NT_OUTPUT_A) ||
+                                (event.winner == 2 && pt == NT_OUTPUT_B);
+                    if (!match) continue;
+                }
+
                 double credit = 0.0;
                 
                 #if ELIGIBILITY_TRACE_ENABLE
                 if (net->use_eligibility_trace) {
-                    /* 资格迹作为信用分配载体 */
-                    credit = syn->eligibility_trace;
+                    /* 奖励到达时把多尺度迹结算到当前 tick，再取加权和 */
+                    credit = synapse_total_credit(net, syn);
                 } else {
                     /* 消融：资格迹关闭 → 无法进行延迟信用分配，权重不更新 */
                     credit = 0.0;
@@ -489,6 +606,9 @@ void net_tick(NetworkState* net) {
     
     /* Step1: 膜电位更新 + 发放判定 */
     update_neurons(net);
+
+    /* Step1b: 输出层竞争（winner-take-all 侧抑制） */
+    apply_output_competition(net);
     
     /* Step2: 资格迹更新（事件驱动STDP） */
     update_eligibility_traces(net);
@@ -540,7 +660,7 @@ void net_clear_stimulus(NetworkState* net) {
 /* ============================================================
  * 奖励注入（写入队列）
  * ============================================================ */
-void net_inject_reward(NetworkState* net, double reward, int delay_ticks) {
+void net_inject_reward_vote(NetworkState* net, double reward, int delay_ticks, int winner) {
     /* 检查队列空间 */
     int next_tail = (net->queue_tail + 1) % QUEUE_SIZE;
     if (next_tail == net->queue_head) {
@@ -550,7 +670,12 @@ void net_inject_reward(NetworkState* net, double reward, int delay_ticks) {
     
     net->reward_queue[net->queue_tail].reward_scalar = reward;
     net->reward_queue[net->queue_tail].delivery_tick = net->current_tick + delay_ticks;
+    net->reward_queue[net->queue_tail].winner = winner;
     net->queue_tail = next_tail;
+}
+
+void net_inject_reward(NetworkState* net, double reward, int delay_ticks) {
+    net_inject_reward_vote(net, reward, delay_ticks, 0);
 }
 
 /* ============================================================
@@ -638,11 +763,28 @@ void net_dump_trace_stats(NetworkState* net, FILE* fp) {
             if (t > t_max) t_max = t;
         }
     }
-    fprintf(fp, "Trace stats: nonzero=%d/%d mean=%.4f min=%.4f max=%.4f\n",
-            nonzero, net->synapse_count,
+    fprintf(fp, "Trace stats: K=%d nonzero=%d/%d mean=%.4f min=%.4f max=%.4f\n",
+            net->hp.trace_k, nonzero, net->synapse_count,
             nonzero > 0 ? t_sum / nonzero : 0.0,
             nonzero > 0 ? t_min : 0.0,
             nonzero > 0 ? t_max : 0.0);
+
+    /* 逐尺度统计：用于验证多尺度确实在各自时间窗内保留信用 */
+    {
+        int k;
+        for (k = 0; k < net->hp.trace_k; k++) {
+            int nz = 0;
+            double sum = 0.0;
+            for (s = 0; s < net->synapse_count; s++) {
+                double v = net->synapses[s].e[k];
+                if (fabs(v) > 1e-8) { nz++; sum += v; }
+            }
+            fprintf(fp, "  scale[%d]: tau=%.1f alpha=%.4f lambda=%.6f nonzero=%d mean=%.4f\n",
+                    k, net->hp.tau_trace_k[k], net->hp.trace_alpha[k],
+                    net->hp.lambda_trace_k[k], nz,
+                    nz > 0 ? sum / nz : 0.0);
+        }
+    }
 }
 
 void net_dump_spiking_counts(NetworkState* net, FILE* fp) {

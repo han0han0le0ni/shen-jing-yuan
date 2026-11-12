@@ -55,6 +55,11 @@ void print_usage(const char* prog) {
     printf("  --trials N         Total trials (default: 1000)\n");
     printf("  --seed N           Random seed (default: 12345)\n");
     printf("  --out FILE         Output CSV file path\n");
+    printf("  --jsonl FILE       Output JSONL log (train.jsonl compatible)\n");
+    printf("  --tag NAME         Tag written into every JSONL record\n");
+    printf("  --trace-k N        Eligibility trace scales: 1..3 (default: 3)\n");
+    printf("  --tau-traces a,b,c Trace time constants (default: 20,100,500)\n");
+    printf("  --learning-rate X  Override reward-modulated learning rate\n");
     printf("  --disable_trace     Disable eligibility trace (ablation)\n");
     printf("  --disable_reward    Disable reward modulation (ablation)\n");
 }
@@ -62,8 +67,15 @@ void print_usage(const char* prog) {
 int main(int argc, char* argv[]) {
     BenchmarkConfig cfg;
     std::string out_file = "data/benchmark1_results.csv";  /* 相对 Experiment 目录 */
+    std::string jsonl_path;
+    std::string tag = "default";
     bool force_no_trace = false;
     bool force_no_reward = false;
+    int trace_k = 3;
+    double tau_traces[3] = { 20.0, 100.0, 500.0 };
+    double learning_rate_override = -1.0;
+    double psp_override = -1.0;
+    bool credit_winner_only = false;   /* true: 只更新被选输出的输入突触 */
     
     /* 解析命令行 */
     for (int i = 1; i < argc; i++) {
@@ -84,6 +96,21 @@ int main(int argc, char* argv[]) {
         else if (arg == "--trials") next(cfg.trials);
         else if (arg == "--seed") nextu(cfg.seed);
         else if (arg == "--out") { if (i+1 < argc) out_file = argv[++i]; }
+        else if (arg == "--jsonl") { if (i+1 < argc) jsonl_path = argv[++i]; }
+        else if (arg == "--tag") { if (i+1 < argc) tag = argv[++i]; }
+        else if (arg == "--trace-k") next(trace_k);
+        else if (arg == "--learning-rate") { if (i+1 < argc) learning_rate_override = atof(argv[++i]); }
+        else if (arg == "--psp-factor") { if (i+1 < argc) psp_override = atof(argv[++i]); }
+        else if (arg == "--tau-traces") {
+            if (i+1 < argc) {
+                double a = tau_traces[0], b = tau_traces[1], c = tau_traces[2];
+                int n = sscanf(argv[++i], "%lf,%lf,%lf", &a, &b, &c);
+                if (n >= 1) tau_traces[0] = a;
+                if (n >= 2) tau_traces[1] = b;
+                if (n >= 3) tau_traces[2] = c;
+            }
+        }
+        else if (arg == "--credit-winner") credit_winner_only = true;
         else if (arg == "--disable_trace") force_no_trace = true;
         else if (arg == "--disable_reward") force_no_reward = true;
     }
@@ -101,6 +128,10 @@ int main(int argc, char* argv[]) {
     printf("El Trace: %s, Reward Mod: %s\n",
            force_no_trace ? "OFF (ABLATION)" : (ELIGIBILITY_TRACE_ENABLE ? "ON" : "OFF (COMPILE-TIME DISABLED)"),
            force_no_reward ? "OFF (ABLATION)" : (REWARD_MODULATION_ENABLE ? "ON" : "OFF (COMPILE-TIME DISABLED)"));
+    printf("Eligibility scales: K=%d, tau=[%.1f, %.1f, %.1f], alpha=1/K, lr=%.5f%s\n",
+           trace_k, tau_traces[0], tau_traces[1], tau_traces[2],
+           learning_rate_override > 0 ? learning_rate_override : 0.005,
+           learning_rate_override > 0 ? " (override)" : "");
     
     /* 初始化网络 */
     NetworkState net;
@@ -110,6 +141,16 @@ int main(int argc, char* argv[]) {
         return 1;
     }
     
+    /* 应用多尺度迹 / 学习率配置（必须在消融开关之前） */
+    {
+        HyperParams hp = net.hp;
+        hp.trace_k = trace_k;
+        for (int k = 0; k < 3; k++) hp.tau_trace_k[k] = tau_traces[k];
+        if (learning_rate_override > 0.0) hp.learning_rate = learning_rate_override;
+        if (psp_override > 0.0) hp.psp_factor = psp_override;
+        net_set_hyperparams(&net, &hp);
+    }
+
     /* 运行时强制消融（可选） */
     if (force_no_trace) net.use_eligibility_trace = 0;
     if (force_no_reward) net.use_reward_modulation = 0;
@@ -127,6 +168,13 @@ int main(int argc, char* argv[]) {
     /* 写CSV头 */
     fprintf(fp, "trial,stimulus_type,predicted_vote,correct,output_a_rate,output_b_rate,"
                 "reward_given,reward_baseline,elapsed_ticks\n");
+
+    /* JSONL 日志（M1）：每 trial 一行，末尾一条 summary */
+    FILE* jf = nullptr;
+    if (!jsonl_path.empty()) {
+        jf = fopen(jsonl_path.c_str(), "w");
+        if (!jf) fprintf(stderr, "WARN: cannot open jsonl: %s\n", jsonl_path.c_str());
+    }
     
     /* 元数据 sidecar：与 B2 一致，记录超参与构建信息 */
     std::string meta_path = out_file + ".meta.json";
@@ -146,6 +194,16 @@ int main(int argc, char* argv[]) {
                 cfg.trials, cfg.delay_ticks, cfg.seed);
         fprintf(mf, "  \"el_trace\": %d, \"reward_mod\": %d,\n",
                 net.use_eligibility_trace, net.use_reward_modulation);
+        fprintf(mf, "  \"trace_k\": %d, \"tau_trace\": [%.1f, %.1f, %.1f],\n",
+                net.hp.trace_k, net.hp.tau_trace_k[0], net.hp.tau_trace_k[1], net.hp.tau_trace_k[2]);
+        fprintf(mf, "  \"trace_alpha\": [%.4f, %.4f, %.4f], \"learning_rate\": %.6f,\n",
+                net.hp.trace_alpha[0], net.hp.trace_alpha[1], net.hp.trace_alpha[2],
+                net.hp.learning_rate);
+        {
+            std::string jpath = jsonl_path;
+            for (char& ch : jpath) if (ch == '\\') ch = '/';
+            fprintf(mf, "  \"jsonl\": \"%s\",\n", jpath.c_str());
+        }
         fprintf(mf, "  \"neurons\": %d, \"synapses\": %d\n", net.neuron_count, net.synapse_count);
         fprintf(mf, "}\n");
         fclose(mf);
@@ -177,9 +235,8 @@ int main(int argc, char* argv[]) {
         /* 输出观察窗口：累积观察期内OA和OB的发放次数 */
         const int OBSERVE_WINDOW = 15; /* 观察15 ticks */
         
-        /* Phase 1: 刺激注入 + 同时观察输出 */
+        /* Phase 1: 刺激注入 + 观察窗口内累计输出发放 */
         int peak_a_count = 0, peak_b_count = 0;
-        const int PEAK_TICK = 2;  /* 信号传播最强时刻 */
         
         for (int t = 0; t < OBSERVE_WINDOW; t++) {
             if (t < cfg.stim_duration) {
@@ -194,20 +251,18 @@ int main(int argc, char* argv[]) {
             net_tick(&net);
             ticks_in_trial++;
             
-            /* 在峰值tick记录发放计数 */
-            if (t == PEAK_TICK) {
-                for (int i = 0; i < net.neuron_count; i++) {
-                    if (net.neurons[i].is_spiking) {
-                        if (net.neurons[i].type == NT_OUTPUT_A) peak_a_count++;
-                        if (net.neurons[i].type == NT_OUTPUT_B) peak_b_count++;
-                    }
+            /* 窗口内累计，避免单 tick 峰值噪声 */
+            for (int i = 0; i < net.neuron_count; i++) {
+                if (net.neurons[i].is_spiking) {
+                    if (net.neurons[i].type == NT_OUTPUT_A) peak_a_count++;
+                    if (net.neurons[i].type == NT_OUTPUT_B) peak_b_count++;
                 }
             }
         }
         
         /* Phase 2: 用峰值时刻的快照投票 */
-        double out_a_rate = (double)peak_a_count / net.output_a_count;
-        double out_b_rate = (double)peak_b_count / net.output_b_count;
+        double out_a_rate = (double)peak_a_count / (net.output_a_count * OBSERVE_WINDOW);
+        double out_b_rate = (double)peak_b_count / (net.output_b_count * OBSERVE_WINDOW);
         
         /* Phase 3: 决策投票 */
         int predicted;
@@ -232,11 +287,19 @@ int main(int argc, char* argv[]) {
         if (is_correct) correct_count++;
         
         /* Phase 4: 注入延迟奖励 */
-        net_inject_reward(&net, reward_val, cfg.delay_ticks);
+        /* 信用范围：默认全局 R-STDP；--credit-winner 只更新被选输出。
+         * 两者都保留，用于 B1 消融对比。 */
+        if (credit_winner_only) {
+            net_inject_reward_vote(&net, reward_val, cfg.delay_ticks, predicted);
+        } else {
+            net_inject_reward(&net, reward_val, cfg.delay_ticks);
+        }
         
         /* Phase 5: 等待奖励到达 + 冷却期（足够让奖励队列被处理完） */
         /* 先让奖励到达：推进到 delay_ticks */
-        int reward_arrival_tick = ticks_in_trial + cfg.delay_ticks + 1;
+        /* 必须用全局 tick：奖励队列的 delivery_tick 也是全局 tick。
+         * 旧实现用 trial 局部 ticks_in_trial，导致延迟从未真正生效。 */
+        int reward_arrival_tick = net.current_tick + cfg.delay_ticks + 1;
         while (net.current_tick < reward_arrival_tick) {
             net_tick(&net);
             ticks_in_trial++;
@@ -253,6 +316,19 @@ int main(int argc, char* argv[]) {
                 trial, stimulus_type, predicted, is_correct,
                 out_a_rate, out_b_rate, reward_val,
                 net.reward_baseline, ticks_in_trial);
+
+        /* 写 JSONL：一行一个 trial，字段与 spec/judgments.md 对齐 */
+        if (jf) {
+            fprintf(jf,
+                "{\"event\":\"trial\",\"tag\":\"%s\",\"trial\":%d,\"stimulus\":%d,"
+                "\"vote\":%d,\"correct\":%d,\"out_a\":%.4f,\"out_b\":%.4f,"
+                "\"reward\":%.2f,\"baseline\":%.4f,\"ticks\":%d,"
+                "\"delay\":%d,\"trace_k\":%d,\"seed\":%u,\"phase\":\"%s\"}\n",
+                tag.c_str(), trial, stimulus_type, predicted, is_correct,
+                out_a_rate, out_b_rate, reward_val, net.reward_baseline,
+                ticks_in_trial, cfg.delay_ticks, net.hp.trace_k, cfg.seed,
+                (trial < train_total) ? "train" : "test");
+        }
         
         /* 进度输出 */
         if ((trial + 1) % 200 == 0) {
@@ -267,7 +343,27 @@ int main(int argc, char* argv[]) {
     }
     
     fclose(fp);
-    
+
+    /* JSONL summary：一个条件一条，便于 tools/b1_report.py 汇总 */
+    if (jf) {
+        fprintf(jf,
+            "{\"event\":\"summary\",\"tag\":\"%s\",\"trials\":%d,"
+            "\"train_acc\":%.2f,\"test_acc\":%.2f,\"delay\":%d,"
+            "\"trace_k\":%d,\"tau_trace\":[%.1f,%.1f,%.1f],"
+            "\"alpha\":[%.4f,%.4f,%.4f],\"lr\":%.6f,"
+            "\"seed\":%u,\"neurons\":%d,\"synapses\":%d,"
+            "\"el_trace\":%d,\"reward_mod\":%d}\n",
+            tag.c_str(), cfg.trials,
+            train_total > 0 ? (double)train_correct / train_total * 100.0 : 0.0,
+            test_total > 0 ? (double)test_correct / test_total * 100.0 : 0.0,
+            cfg.delay_ticks, net.hp.trace_k,
+            net.hp.tau_trace_k[0], net.hp.tau_trace_k[1], net.hp.tau_trace_k[2],
+            net.hp.trace_alpha[0], net.hp.trace_alpha[1], net.hp.trace_alpha[2],
+            net.hp.learning_rate, cfg.seed, net.neuron_count, net.synapse_count,
+            net.use_eligibility_trace, net.use_reward_modulation);
+        fclose(jf);
+    }
+
     /* 最终结果 */
     double train_acc = (double)train_correct / train_total * 100.0;
     double test_acc = (double)test_correct / test_total * 100.0;
@@ -297,6 +393,9 @@ int main(int argc, char* argv[]) {
         fprintf(diag, "Hyperparameters:\n");
         fprintf(diag, "  tau_stdp=%.1f, tau_trace=%.1f, lambda_trace=%.6f\n",
                 net.hp.tau_stdp, net.hp.tau_trace, net.hp.lambda_trace);
+        fprintf(diag, "  trace_k=%d, tau_k=[%.1f, %.1f, %.1f], alpha=[%.4f, %.4f, %.4f]\n",
+                net.hp.trace_k, net.hp.tau_trace_k[0], net.hp.tau_trace_k[1], net.hp.tau_trace_k[2],
+                net.hp.trace_alpha[0], net.hp.trace_alpha[1], net.hp.trace_alpha[2]);
         fprintf(diag, "  stdp_a_plus=%.2f, stdp_a_minus=%.2f, lr=%.4f\n",
                 net.hp.stdp_a_plus, net.hp.stdp_a_minus, net.hp.learning_rate);
         fprintf(diag, "  baseline_window=%d\n", net.hp.reward_baseline_window);

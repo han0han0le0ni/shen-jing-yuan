@@ -70,7 +70,8 @@ typedef struct {
     int pre_id;                 /* 突触前神经元ID */
     int post_id;                /* 突触后神经元ID */
     double weight;              /* 突触权重 */
-    double eligibility_trace;   /* 资格迹（ELIGIBILITY_TRACE_ENABLE=1时有效） */
+    double eligibility_trace;   /* 总迹 = Σ α_k e[k]（诊断/兼容用） */
+    double e[3];                /* 多尺度资格迹，K<=3（M1） */
     int last_stdp_tick;        /* 上次STDP更新的tick（惰性衰减用） */
 } Synapse;
 
@@ -80,6 +81,7 @@ typedef struct {
 typedef struct {
     double reward_scalar;       /* 奖励标量（+1.0奖励/-1.0惩罚/0.0无奖励） */
     int delivery_tick;          /* 奖励到达tick */
+    int winner;                 /* 0=全部突触, 1=只更新OUTPUT_A输入, 2=只更新OUTPUT_B输入 */
 } RewardEvent;
 
 /* ============================================================
@@ -87,13 +89,20 @@ typedef struct {
  * ============================================================ */
 typedef struct {
     double tau_stdp;            /* STDP时间常数 (ticks)，默认20 */
-    double tau_trace;           /* 资格迹时间常数 (ticks)，默认20 */
-    double lambda_trace;        /* 资格迹衰减因子 = exp(-1/tau_trace) */
+    double tau_trace;           /* 单尺度回退时间常数 (ticks)，默认200 */
+    double lambda_trace;        /* = exp(-1/tau_trace) */
     double stdp_a_plus;         /* LTP幅值，默认0.1 */
     double stdp_a_minus;        /* LTD幅值，默认0.12 */
     double learning_rate;       /* 奖励调制学习率，默认0.05 */
+    double psp_factor;          /* 突触后电位幅值因子（B1 校准项，默认3.0） */
     double weight_decay_lambda; /* 权重软遗忘衰减率，默认1e-5 */
     int    reward_baseline_window; /* 奖励预测误差基线窗口 (ticks)，默认100 */
+
+    /* 多尺度资格迹（M1）：总迹 = Σ α_k e[k]，k < trace_k */
+    int    trace_k;             /* 1..3，默认3；1=单尺度 */
+    double tau_trace_k[3];      /* 各尺度时间常数，默认 20/100/500 */
+    double lambda_trace_k[3];   /* 各尺度衰减因子 */
+    double trace_alpha[3];      /* 各尺度权重，默认 1/K */
 } HyperParams;
 
 /* ============================================================
@@ -153,6 +162,8 @@ void net_clear_stimulus(NetworkState* net);      /* 清除所有感觉神经元�
 
 /* 奖励注入（宿主调用） */
 void net_inject_reward(NetworkState* net, double reward, int delay_ticks);
+/* winner: 0=全部突触（旧行为）, 1=OUTPUT_A 输入, 2=OUTPUT_B 输入 */
+void net_inject_reward_vote(NetworkState* net, double reward, int delay_ticks, int winner);
 
 /* 输出读取（宿主调用） */
 int  net_read_output_vote(NetworkState* net);     /* 返回: 1=偏好A, 2=偏好B, 0=平局 */
