@@ -46,6 +46,7 @@ ROOT_DIR = os.path.abspath(os.path.join(APP_DIR, ".."))
 sys.path.insert(0, APP_DIR)
 from backend_cpu import CPUBackend
 from backend_vec import VecBackend, L1, L2, MAX_OMEGA
+from learning_registry import discover, LearningWatcher, plugin_dir
 
 # ============================================================
 # 字体
@@ -1427,6 +1428,15 @@ class MainWindow(QMainWindow):
         self._last_episode = -1        # 轨迹按回合清空：检测 episode 变化
         self._teacher_forced_vec = False   # 是否因启用老师而强制切到向量化后端
         self._results_win = None           # 「基准成果」窗口（懒创建）
+
+        # 学习接口插件：自动发现 + 目录热加载
+        self._plugins, self._plugin_errors = discover()
+        self._plugin_ids = ["none"] + [p["id"] for p in self._plugins]
+        self._plugin_param_values = {}     # pid -> {key: value}
+        self._plugin_controls = {}         # key -> QWidget
+        self._active_plugin_id = None
+        self._learning_watcher = LearningWatcher(parent=self)
+        self._learning_watcher.changed.connect(self._on_plugins_changed)
         self.setWindowTitle("脉冲神经网络 · 实时训练可视化  |  Benchmark-2")
         # 按当前屏幕工作区自适应，避免 150% 缩放下窗口底边被任务栏遮住
         scr = QGuiApplication.primaryScreen()
@@ -1762,7 +1772,7 @@ class MainWindow(QMainWindow):
         v.setContentsMargins(0, 0, 0, 0)
         v.setSpacing(0)
         v.addWidget(tabs, 1)
-        v.insertWidget(1, self._build_teacher_card())
+        v.insertWidget(0, self._build_teacher_card())   # 学习接口置顶，随检测结果显隐
         v.addWidget(row)
         dock.setWidget(box)
         dock.setMinimumWidth(340)
@@ -1786,23 +1796,34 @@ class MainWindow(QMainWindow):
         self._results_win.activateWindow()
 
     def _build_teacher_card(self):
-        """蒸馏老师（学习接口）设置卡片：选老师 + 引导比例 G + 逐步放手。"""
+        """学习接口卡片：只列出自动检测到的插件；无插件时整卡隐藏。"""
         card = QWidget()
         card.setObjectName("TeacherCard")
         v = QVBoxLayout(card)
         v.setContentsMargins(12, 10, 12, 10)
         v.setSpacing(8)
-        ttl = QLabel("蒸馏老师（学习接口）")
+        ttl = QLabel("蒸馏老师（学习接口 · 自动检测）")
         ttl.setObjectName("CardTitle")
         v.addWidget(ttl)
 
+        self.lbl_plugin_state = QLabel("")
+        self.lbl_plugin_state.setObjectName("MuteSmall")
+        self.lbl_plugin_state.setWordWrap(True)
+        v.addWidget(self.lbl_plugin_state)
+
         self.combo_teacher = QComboBox()
-        self.combo_teacher.addItems([
-            "无老师（纯脉冲网络）", "DLS 逆运动学（现成解析解）",
-            "转置雅可比（另一种 IK）", "无老师基线"])
         self.combo_teacher.setMinimumWidth(180)
+        self.combo_teacher.setToolTip(
+            "选项来自 vis/learning_plugins/，文件增改删会自动刷新；"
+            "引导只在向量化后端生效，选择后自动切换。")
         self.combo_teacher.currentIndexChanged.connect(self._on_teacher)
         v.addWidget(self.combo_teacher)
+
+        self.plugin_param_box = QWidget()
+        self.plugin_param_lay = QVBoxLayout(self.plugin_param_box)
+        self.plugin_param_lay.setContentsMargins(0, 0, 0, 0)
+        self.plugin_param_lay.setSpacing(6)
+        v.addWidget(self.plugin_param_box)
 
         gh = QWidget()
         ghb = QHBoxLayout(gh)
@@ -1823,11 +1844,8 @@ class MainWindow(QMainWindow):
         self.chk_anneal.toggled.connect(self._on_teacher_anneal)
         v.addWidget(self.chk_anneal)
 
-        tip = QLabel("先学（蒸馏老师）→ 再用（G=0 纯自主）→ 再创新。引导需在向量化"
-                     "后端承载：选老师会自动从 C DLL 切过去。")
-        tip.setObjectName("MuteSmall")
-        tip.setWordWrap(True)
-        v.addWidget(tip)
+        self.teacher_card = card
+        self._refresh_plugin_ui(initial=True)
         return card
 
     def _param_values(self):
@@ -1880,32 +1898,162 @@ class MainWindow(QMainWindow):
     def _toggle_settings(self):
         self.settings_dock.setVisible(not self.settings_dock.isVisible())
 
-    # ---------- 蒸馏老师（学习接口） ----------
+    # ---------- 学习接口（插件自动发现 + 热加载） ----------
+    def _refresh_plugin_ui(self, initial=False):
+        """重新扫描插件目录，按需重建选项栏与参数控件。"""
+        plugins, errors = discover()
+        self._plugins, self._plugin_errors = plugins, errors
+        old_id = self._active_plugin_id
+        self._plugin_ids = ["none"] + [p["id"] for p in plugins]
+
+        self.combo_teacher.blockSignals(True)
+        self.combo_teacher.clear()
+        self.combo_teacher.addItem("无老师（纯脉冲网络）")
+        for p in plugins:
+            self.combo_teacher.addItem(p["name"])
+        keep = old_id if old_id in self._plugin_ids else "none"
+        self.combo_teacher.setCurrentIndex(self._plugin_ids.index(keep))
+        self.combo_teacher.blockSignals(False)
+
+        # 一个插件都没有 → 整张卡片不出现
+        self.teacher_card.setVisible(len(plugins) > 0)
+
+        text = "已检测 %d 个学习接口 · 热加载开启" % len(plugins)
+        if errors:
+            text += " · %d 个加载失败" % len(errors)
+        self.lbl_plugin_state.setText(text)
+        self.lbl_plugin_state.setToolTip(
+            "\n".join(errors) if errors else "监视目录：%s" % plugin_dir())
+
+        self._rebuild_plugin_params()
+        if initial:
+            return
+        if keep == "none":
+            self.engine._teacher = None
+            self._active_plugin_id = None
+            self._teacher_status("老师：无")
+        else:
+            self._activate_plugin(keep)   # 插件代码被改写时重新实例化
+
+    def _on_plugins_changed(self):
+        self._refresh_plugin_ui(initial=False)
+
     def _on_teacher(self, idx):
         if not hasattr(self, "combo_dev"):
-            return   # 构建阶段 combo_dev 尚未创建，跳过
-        key = TEACHER_KEYS[max(0, idx)]
+            return
+        if not (0 <= idx < len(self._plugin_ids)):
+            return
+        key = self._plugin_ids[idx]
+        self._rebuild_plugin_params()
         if key == "none":
             self.engine._teacher = None
+            self._active_plugin_id = None
             self._teacher_status("老师：无")
             if self._teacher_forced_vec:
                 self._teacher_forced_vec = False
-                self.combo_dev.setCurrentIndex(DEFAULT_DEVICE_INDEX)  # 触发 _reset
+                self.combo_dev.setCurrentIndex(DEFAULT_DEVICE_INDEX)
             return
-        self.engine._teacher = TEACHERS[key]()
+        self._activate_plugin(key)
+
+    def _activate_plugin(self, pid):
+        p = next((x for x in self._plugins if x["id"] == pid), None)
+        if p is None:
+            self.engine._teacher = None
+            self._active_plugin_id = None
+            return
+        vals = self._plugin_param_values.get(pid)
+        if vals is None:
+            vals = {s["key"]: s.get("default") for s in p["params"]}
+            self._plugin_param_values[pid] = vals
+        try:
+            obj = p["create"](dict(vals))
+            if not hasattr(obj, "command"):
+                raise TypeError("create() 返回对象缺少 command()")
+        except Exception as exc:
+            self.engine._teacher = None
+            self._active_plugin_id = None
+            self._teacher_status("老师加载失败：%s" % exc)
+            return
+
+        self.engine._teacher = obj
         self.engine._teacher_g = float(self.spin_teacher_g.value())
         self.engine._teacher_anneal = self.chk_anneal.isChecked()
+        self._active_plugin_id = pid
         self._teacher_forced_vec = False
-        # 引导钩子只在向量化后端生效：选老师且当前是 C DLL 时自动切过去
         if DEVICES[self.combo_dev.currentIndex()][1] == "cdll":
             self._teacher_forced_vec = True
             idx_vec = 0 if DEVICES[0][1] == "cuda" else 1
-            self.combo_dev.setCurrentIndex(idx_vec)   # 触发 _reset（engine 复用，保留 _teacher）
+            self.combo_dev.setCurrentIndex(idx_vec)
             self._teacher_status("老师：%s · G=%.2f（已切向量化后端）" %
-                                 (self.engine._teacher.name, self.engine._teacher_g))
+                                 (obj.name, self.engine._teacher_g))
         else:
             self._teacher_status("老师：%s · G=%.2f" %
-                                 (self.engine._teacher.name, self.engine._teacher_g))
+                                 (obj.name, self.engine._teacher_g))
+
+    def _rebuild_plugin_params(self):
+        """只给当前插件声明过的参数生成控件；无参数则整个区域隐藏。"""
+        while self.plugin_param_lay.count():
+            it = self.plugin_param_lay.takeAt(0)
+            w = it.widget()
+            if w is not None:
+                w.deleteLater()
+        self._plugin_controls = {}
+
+        pid = self._active_plugin_id
+        if pid is None:
+            idx = self.combo_teacher.currentIndex()
+            if 0 <= idx < len(self._plugin_ids) and self._plugin_ids[idx] != "none":
+                pid = self._plugin_ids[idx]
+        p = next((x for x in self._plugins if x["id"] == pid), None)
+        specs = p["params"] if p else []
+        self.plugin_param_box.setVisible(bool(specs))
+        if not specs:
+            return
+
+        vals = self._plugin_param_values.setdefault(pid, {})
+        for spec in specs:
+            row = QWidget()
+            hb = QHBoxLayout(row)
+            hb.setContentsMargins(0, 0, 0, 0)
+            hb.setSpacing(8)
+            hb.addWidget(QLabel(spec["label"]))
+            key = spec["key"]
+            value = vals.get(key, spec.get("default"))
+            if spec["type"] == "float":
+                w = QDoubleSpinBox()
+                w.setRange(spec["min"], spec["max"])
+                w.setSingleStep(spec["step"])
+                w.setDecimals(3)
+                w.setValue(float(value))
+                w.valueChanged.connect(
+                    lambda v, k=key: self._on_plugin_param(k, float(v)))
+            elif spec["type"] == "bool":
+                w = QCheckBox()
+                w.setChecked(bool(value))
+                w.toggled.connect(
+                    lambda v, k=key: self._on_plugin_param(k, bool(v)))
+            else:
+                w = QComboBox()
+                w.addItems(spec["choices"])
+                if value in spec["choices"]:
+                    w.setCurrentIndex(spec["choices"].index(value))
+                w.currentTextChanged.connect(
+                    lambda v, k=key: self._on_plugin_param(k, v))
+            hb.addWidget(w, 1)
+            self.plugin_param_lay.addWidget(row)
+            self._plugin_controls[key] = w
+            vals.setdefault(key, value)
+
+    def _on_plugin_param(self, key, value):
+        pid = self._active_plugin_id
+        if pid is None:
+            idx = self.combo_teacher.currentIndex()
+            if not (0 <= idx < len(self._plugin_ids)) or self._plugin_ids[idx] == "none":
+                return
+            pid = self._plugin_ids[idx]
+        self._plugin_param_values.setdefault(pid, {})[key] = value
+        if self._active_plugin_id is not None:
+            self._activate_plugin(pid)   # 参数改动即时重建老师
 
     def _on_teacher_g(self, v):
         self.engine._teacher_g = float(v)
