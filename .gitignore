@@ -62,3 +62,6 @@ Experiment/data/b1_bias/
 
 # B1 离线监督上界原始数据（可复现：tools/b1_supervised_ceiling.py）
 Experiment/data/b1_ceiling/
+
+# B1 严格对称读出实验原始数据（可复现：tools/b1_symmetric_readout.py）
+Experiment/data/b1_sym/

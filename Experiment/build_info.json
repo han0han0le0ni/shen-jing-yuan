@@ -1,5 +1,5 @@
 {
-    "built_at":  "2026-11-12T23:30:36",
+    "built_at":  "2026-11-13T00:02:42",
     "compiler":  "gcc.exe (MinGW-W64 x86_64-ucrt-posix-seh, built by Brecht Sanders, r4) 16.1.0",
     "macros":  "defaults from headers: ELIGIBILITY_TRACE_ENABLE=1, REWARD_MODULATION_ENABLE=1",
     "commands":  [
@@ -8,24 +8,27 @@
                      "g++ -O2 -Wall -Wextra -I core -c \u003chost\u003e.cpp -o \u003cobj\u003e.o",
                      "g++ \u003ccore\u003e.o \u003chost\u003e.o \u003cobj\u003e/seed_bundle.o -o \u003cexe\u003e -lm",
                      "gcc -O2 -Wall -Wextra -I core -I brain -shared brain/benchmark1_probe.c \u003cobj\u003e/b1_core.o \u003cobj\u003e/seed_bundle.o -o b1_probe.dll -lm",
+                     "gcc -O2 -Wall -Wextra -I core -I brain -shared brain/benchmark1_sym.c \u003cobj\u003e/b1_core.o \u003cobj\u003e/seed_bundle.o -o b1_sym.dll -lm",
                      "gcc -O2 -Wall -Wextra -shared brain_b2/benchmark2_core.c -o b2_core.dll -lm"
                  ],
     "sources":  {
                     "brain\\benchmark1_probe.c":  "d2ac2270786c3f42ae65f94c9037e46247ab67e52d8957531f5f486ac82de31b",
+                    "brain_b2\\benchmark2_core.c":  "a20418e39e22cea53dfd366a2d339f81d7c7b5e93b9af9f7cf904654c046dd4a",
                     "core\\seed_bundle.c":  "8660d004ef21a093fcb1435aa95e11ab271e01190ece76feb5f5e9d6ba3c6368",
                     "host\\benchmark1_host.cpp":  "c61e3120da39326b971b79272bf3d76931bdcdda1d5c0355f55463476ebc4983",
                     "core\\seed_bundle.h":  "502c6900dff9b8d02e8abea80e106a8076d7388d47ba6fcdbe2631c104317a98",
                     "host_b2\\benchmark2_host.cpp":  "9d8bafe6fe160f618000f655b59a4463fbd3f1c78db9f65389daf4ebbec49589",
                     "brain_b2\\benchmark2_core.h":  "e900d9399637cbba86dfac2033a06a8c32a308d99945268cef8743722be5916e",
                     "brain\\benchmark1_core.c":  "1f9413c0dce95c54aacc77ca723fd2e79a1ed1dd5dc716dea1c766668d048301",
-                    "brain_b2\\benchmark2_core.c":  "a20418e39e22cea53dfd366a2d339f81d7c7b5e93b9af9f7cf904654c046dd4a",
+                    "brain\\benchmark1_sym.c":  "5811b09ddf98c013131f487c3d5ff167d3541d03ae6c672ea5c003c0bbee784e",
                     "brain\\benchmark1_core.h":  "75f2258963dc3c8075f9e64f1710087f5ac59b4ae9a8339d78ae2c39debd2997"
                 },
     "artifacts":  {
-                      "b1_probe.dll":  "f731db8b0ccd6ff8594c42aedb57c6a0f4b506bfdc8e366d8b653da11695cce5",
-                      "benchmark1.exe":  "4e894f61e72b30ab505683832ce0501048a7bb8e641de3db064659ea3fee0169",
-                      "b2_core.dll":  "7eaa2f292f0b73615480a62275763765859a40509c2d081cf338ab20a0628b8f",
-                      "benchmark2.exe":  "1af21eb9fa1cb385000813167380c8e5eeff59519fa341dc07870b65f077553f",
-                      "b2_core.o":  "849b35bd5fdd2a26ae97842e238961a69b4b0fbbfcf2bab4c18d71134ca18c43"
+                      "b1_probe.dll":  "1709350ce0cc1234edbcdbf7bae4af0ad3774fda33d7dc7b5ff75c591eab14e2",
+                      "benchmark2.exe":  "cd6840a5cd0b049972c9cc16f2a789f33f0d97e9d5f43e4cec258deea29c4c94",
+                      "b2_core.o":  "849b35bd5fdd2a26ae97842e238961a69b4b0fbbfcf2bab4c18d71134ca18c43",
+                      "benchmark1.exe":  "0b37d654b36a9ac30b07fda3236a484ee4b0cb7f28fcd19438ce2ff52bbf3af2",
+                      "b1_sym.dll":  "ed2d44918bb84b38cf15b6e25d0cba75cfa0a551a84331a445da781579329f35",
+                      "b2_core.dll":  "8994ff18825190e65a86d682b23f7753007d344215b0bafc26c3b97533b4e186"
                   }
 }
