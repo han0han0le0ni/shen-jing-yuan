@@ -1426,6 +1426,7 @@ class MainWindow(QMainWindow):
         self.controls = {}
         self._last_episode = -1        # 轨迹按回合清空：检测 episode 变化
         self._teacher_forced_vec = False   # 是否因启用老师而强制切到向量化后端
+        self._results_win = None           # 「基准成果」窗口（懒创建）
         self.setWindowTitle("脉冲神经网络 · 实时训练可视化  |  Benchmark-2")
         # 按当前屏幕工作区自适应，避免 150% 缩放下窗口底边被任务栏遮住
         scr = QGuiApplication.primaryScreen()
@@ -1636,6 +1637,11 @@ class MainWindow(QMainWindow):
         b.setToolTip("显示/隐藏训练与参数面板（快捷键 P）")
         b.clicked.connect(self._toggle_settings)
         hl.addWidget(b)
+        b = QPushButton("基准成果")
+        b.setObjectName("Ghost")
+        b.setToolTip("打开 Benchmark-1 延迟扫描与消融结果窗口")
+        b.clicked.connect(self._show_results)
+        hl.addWidget(b)
         self.lbl_trial = QLabel("第 0 轮 · 到达 0")
         self.lbl_trial.setObjectName("Perf")
         self.lbl_trial.setToolTip("累计完成轮次 / 碰到目标次数 / 本轮步数")
@@ -1764,6 +1770,20 @@ class MainWindow(QMainWindow):
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock)
         dock.hide()          # 默认收起，避免挤压网络/机械臂视图；P 或「设置面板」展开
         self._apply_settings(silent=True)
+
+    def _show_results(self):
+        """打开 B1 成果窗口（独立模块，也可单独运行）。"""
+        try:
+            from results_panel import ResultsWindow
+        except ImportError:
+            sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+            from results_panel import ResultsWindow
+        if self._results_win is None:
+            self._results_win = ResultsWindow(theme=self.T)
+        self._results_win.refresh()
+        self._results_win.show()
+        self._results_win.raise_()
+        self._results_win.activateWindow()
 
     def _build_teacher_card(self):
         """蒸馏老师（学习接口）设置卡片：选老师 + 引导比例 G + 逐步放手。"""
