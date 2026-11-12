@@ -1,0 +1,286 @@
+# 研发进度对照报告 · 2026-11-12
+
+> 依据：`spec/judgments.md` 冻结 v1（§0 全局口径 / §1–3 判据 / §4 六组消融 / §5 统计规范）、`audit/NeuralOS_设计大纲与开发计划_2026-11-12.md`（M0–M6 计划）、`audit/b1_m1_report.md`、`audit/检测报告.md`、`.workbuddy/memory/2026-11-12.md`、`data/b1_m1/*.jsonl`、`data_b2/*.csv`、实跑 `dialog_lab.py --check`、`git log/status`。
+> 生成脚本：`Experiment/tools/gen_progress_report.py`（可重复运行、全部数字来自文件或实跑）。
+
+## 0. 一页结论
+
+**B1 核心判据不通过（10 seed 复核）：完整组 D=200 仅 1/10 达标，mean 21.87% / median 5.00%；B2 仍不通过；B3 正式实现仍为 0。按 §1 失败动作：停止，转 T1/T2 研究，不得进入 B2。详见 §9.1。**
+
+- 判据文件开头（`judgments.md:4`）明确：**未通过 Benchmark-1 之前，不得启动 Benchmark-2 以上开发。**`§4 跨基准强制消融` 又规定「没有消融表，通过判据不成立」。但深夜多种子复核已判 **B1 不通过**，按 §1 失败动作应停止并转 T1/T2 研究（见 §9.1）。
+- `audit/NeuralOS_设计大纲与开发计划_2026-11-12.md` 的 §2 进度表是**当天上午快照**：它写「阶段 0 接口冻结 0%、多尺度资格迹无、B1 名义通过实为无效、B2 0 PASS」。同日晚间提交 `9e7ff0c`（M0）、`d9c73c1`（M1 多尺度）与冻结判据 §6 已推翻前三项。**该文档与 §6 原表均需标注为历史快照**，进度以 §6.1 复核与本报告 §9.1 为准。
+- 同一口径冲突需固定：`检测报告.md` 的最佳 median `0.4164` 是当时全部 104 个 CSV 的最优；`judgments.md §6` 的 `0.4398` 是 2000-episode 子集最优（`results_best_2000.csv`）。两者不可混用。
+
+### 关键数字（全部可复算）
+
+| 指标 | 实测 | 判据 | 结论 |
+|---|---|---|---|
+| B1 D=200 正确率（10 seed） | mean 21.87% / median 5.00% / 1 达标 | ≥80% | **FAIL** |
+| B1 无资格迹下降（10 配对 seed） | 2.13pp（原 53.3pp 为单 seed） | ≥30pp | **FAIL** |
+| B1 D½（K=3 / K=1） | 919 / 481（单 seed 口径） | ≥200 | 待重做 |
+| B1 强制报告 5 项 | 稀疏化/种子分布已补；τe–N 无法拟合；neuromod 阻塞 | 5 项必须 | 部分 |
+| B1 6 组跨基准消融 | 4 组机制未实现，无法构造消融条件 | 6 组缺一不可 | FAIL |
+| B2 历史运行 | 120 个有效 CSV，0 个达标；最佳 0.4164 | median ≤0.20，10 seed ≥8 | FAIL |
+| B3 教学探针 1000 轮 | hold 0.583 / ECE 0.224 / 236 神经元 / 巩固 +0.000 | ≥0.70 / <0.10 / 20k–50k / >0 | FAIL（且不计入验收） |
+| 未提交改动 | 7 个已跟踪修改 + 21 个未跟踪文件 | — | 风险：当日成果未入库 |
+
+## 1. 计分口径与证据来源
+
+- **完成度定义**：每个里程碑拆成可核对的交付物，`DONE=1 / PARTIAL=0.5 / MISSING=0`，`完成度 = 得分和 / 交付物数`。这是**交付物覆盖率**，不是工时或代码量估计；因此与设计大纲 §2.5 的「约 20% / 约 15%」不可直接比较。
+- **能力口径**：只用 `g=0`（无教师/无解析公式）表现；`g>0` 到达不计入能力（`judgments.md §0.1`）。
+- **B2 重算口径**：遍历 `data_b2/*.csv`，按 `§0.4` 剔除 `init_dist < 0.10` 的 episode，用标准中位数定义（偶数取中间两项均值）重算每次运行的 `dist_ratio` 中位数。共剔除 94 条 invalid episode，2 个空/不可解析文件。
+- **B3 数字来源**：脚本内实际调用 `py -3 vis/dialog_lab.py --check --rounds 1000`，解析其输出；非手工抄录。
+- **证据索引**：`spec/judgments.md`（判据）、`audit/b1_m1_report.md`（B1 表）、`audit/检测报告.md`（B2 历史体检）、`audit/NeuralOS_设计大纲与开发计划_2026-11-12.md`（M0–M6 计划）、`.workbuddy/memory/2026-11-12.md`（当日工作日志）、`git log`（10 次提交）、`git status`（未提交清单）。
+
+## 2. 阶段 / 里程碑对照矩阵
+
+| 里程碑 | 内容 | 计划周期 | 交付物数 | DONE | PARTIAL | MISSING | 完成度 |
+|---|---|---|---|---|---|---|---|
+| M0 | 接口冻结 | 2 周 | 7 | 4 | 1 | 2 | 64% |
+| M1 | B1 重验 | 4 周 | 10 | 6 | 1 | 3 | 65% |
+| M2 | B2 可行性探针 | 4 周 | 4 | 0 | 0 | 4 | 0% |
+| M3 | B2 完整 | 10 周 | 4 | 0 | 0 | 4 | 0% |
+| M4 | B3 最小对话 | 12 周 | 6 | 0 | 1 | 5 | 8% |
+| M5 | 容器与运行时 | 8 周 | 4 | 0 | 1 | 3 | 12% |
+| M6 | 三版系统 | 长期 | 3 | 0 | 0 | 3 | 0% |
+
+### 逐项明细
+
+**M0 接口冻结（64%）**
+
+| 交付物 | 状态 | 证据 / 缺口 |
+|---|---|---|
+| ID 规则定稿 | **PASS** | spec/id_rules.md + core/neuro_id.c / neuro_types.h；build_m0.ps1 71 项通过 |
+| .neuro 索引头 | **PASS** | spec/neuro_header.md + core/container_neuro.h（字段草案，未落 mmap 实现） |
+| seed_bundle 四流 | **PASS** | core/seed_bundle.h/.c + test_m0.c；同 seed 一致性有检查，四流不相关卡方未见独立报告 |
+| er_eligible 标志 | **PASS** | neuro_types.h 位定义 + test_m0.c 隔离测试 |
+| PDc 解码结构 | **FAIL** | 缺 decode_pdc.h 与「合成脉冲序列解码误差 <5%」离线报告；仅 neuro_types.h 有 PdcClass 结构 |
+| 设计文档 6 处冲突修复 | **FAIL** | audit/ 副本仍为 v1.0 且列出 6 处待修；未见 v1.1 销项记录 |
+| Link 端口 schema | 部分 | spec/link_schema.md 为字段表草案，自述「本机暂无 flatc，M5 再落 .fbs」 |
+
+**M1 B1 重验（65%）**
+
+| 交付物 | 状态 | 证据 / 缺口 |
+|---|---|---|
+| 多尺度迹 K=1/2/3 + 单测 | **PASS** | 提交 d9c73c1；K=3 τ=[20,100,500]、α 按 K 归一化 |
+| JSONL 日志 | **PASS** | data/b1_m1/ 47 个 .jsonl，train/trial/summary 事件齐全 |
+| 延迟扫描 6 档全覆盖 | **PASS** | sweep_{k3,k1_200,notrace}_D{10,50,100,200,500,1000}.jsonl |
+| 核心消融（无迹/单尺度/无奖励） | **PASS** | abl_* / comp_* 共 8 组；无迹下降 53.3pp |
+| τe–N 三档 + 指数拟合 | 部分 | 已跑 N=500/1000/2000 × 6 档 τ；N≥1000 各 τ 全 0%，标度律无法拟合（b1_acceptance_report.md §2） |
+| neuromod 同种子统计等价 | **FAIL** | 本机无 Rust/cargo，参考实现无法构建（阻塞，未伪造基线） |
+| ≥5 seed 分布 + mean/SD | **PASS** | 已补 10 seed 的 mean/SD/median 与种子级原始值（b1_acceptance_report.md §1） |
+| 稀疏化（Gini / 有效连接数） | **PASS** | 诊断层新增 init/final 快照；无迹组 Δ 精确为 0（b1_acceptance_report.md §3） |
+| D=200 按种子分布达标 | **FAIL** | 10 seed 仅 1/10 ≥80%，核心判据不通过 |
+| 6 组跨基准消融表 | **FAIL** | 4 组机制未实现，消融条件无法构造；§4 不成立 |
+
+**M2 B2 可行性探针（0%）**
+
+| 交付物 | 状态 | 证据 / 缺口 |
+|---|---|---|
+| 5000 神经元探针 | **FAIL** | 无独立 M2 探针；data_b2 为旧 v16/v19 实验 |
+| 异构输出 + 群体解码 + 势能塑形 | **FAIL** | 无对应实现；backend_vec 仍为 k-WTA 解 ω |
+| 10 seed 固定 1200 tick 预算 | **FAIL** | 历史 123 CSV 为 500/2000 episode，固定目标 |
+| 门槛：≥6/10 median ≤0.4 且 g=0 到达 >0 | **FAIL** | 0/103 PASS（旧口径），g=0 到达 0 次 |
+
+**M3 B2 完整（0%）**
+
+| 交付物 | 状态 | 证据 / 缺口 |
+|---|---|---|
+| 颗粒层 / 误差向量投影 / er_eligible | **FAIL** | 无 |
+| 工作记忆 + 元可塑 + 结构可塑 | **FAIL** | 无 |
+| 6 组消融 × 10 seed + Wilcoxon | **FAIL** | 无 |
+| median ≤0.20，10 seed ≥8 达标 | **FAIL** | 历史最佳 0.4398（2000 ep 子集） |
+
+**M4 B3 最小对话（8%）**
+
+| 交付物 | 状态 | 证据 / 缺口 |
+|---|---|---|
+| 20k–50k 神经元正式网络 | **FAIL** | 教学探针仅 236 神经元，且明确不计入验收 |
+| 固定模板集 + 10–20 标签 + 离线评分表 | 部分 | 探针有 12 标签 / 48+24 模板 / 离线评分表，但非 B3 正式实现 |
+| 1000 轮留出集 ≥70% | **FAIL** | 实测 0.583 |
+| ECE <0.10 | **FAIL** | 实测 0.224 |
+| 睡眠巩固保持率差值 >0 | **FAIL** | 实测 +0.000 |
+| 基元库 forge 消融 + 条件 B 真实统计 | **FAIL** | 无 |
+
+**M5 容器与运行时（12%）**
+
+| 交付物 | 状态 | 证据 / 缺口 |
+|---|---|---|
+| .neuro mmap 零拷贝 | **FAIL** | 仅 container_neuro.h 头部草案 |
+| 检查点原子替换 / .delta 回滚 | 部分 | training_store.py 有原子写与拓扑校验，但面向 GUI 权重快照，非 .neuro |
+| neuro-core/forge/play 三层 | **FAIL** | 无 |
+| migrate / inspect 工具 | **FAIL** | 无 |
+
+**M6 三版系统（0%）**
+
+| 交付物 | 状态 | 证据 / 缺口 |
+|---|---|---|
+| 炼丹炉（竞争发生 + 基元提取） | **FAIL** | 无 |
+| 工业芯（冻结学习 + 硬实时） | **FAIL** | 无 |
+| 伴生灵（选择性学习 + 碎片重放） | **FAIL** | 无 |
+
+**与设计大纲 §2.5 的差异**：大纲写「阶段 0 = 0%、阶段 1 ≈20%、阶段 2 ≈15%、阶段 3–5 = 0%」，反映的是 11-12 上午状态；当天 M0 已落地 4/5 项接口冻结、M1 已实现多尺度迹并一度把 B1 核心判据判为通过（单 seed 口径；深夜多种子复核已推翻，见 §9.1）。M4 正式实现仍为 0（表中 8% 仅来自固定模板集要素的 0.5 分）—— 新增的 `vis/dialog_lab.py` 是**教学探针**，文件头明确写「不计入任何判据」。
+
+## 3. 判据逐项 PASS/FAIL
+
+### B1 · 单突触远端信用分配
+
+| 项 | 阈值 / 要求 | 现状 | 状态 | 证据 |
+|---|---|---|---|---|
+| D=200 正确率（10 seed 分布） | ≥ 80% | mean 21.87% / median 5.00% / 仅 1/10 达标 | **FAIL** | b1_acceptance_report.md §1（原 100% 为单 seed 12345） |
+| 资格迹消融下降（10 配对 seed） | ≥ 30pp | D=200 平均 2.13pp（原 53.3pp 为单 seed） | **FAIL** | b1_acceptance_report.md §1 |
+| 半衰点 D½ | ≥ 200 ticks | 919 / 481（单 seed 口径，需重做） | 部分 | audit/b1_m1_report.md |
+| 延迟扫描 | 6 档全覆盖 | 10/50/100/200/500/1000 全覆盖（单 seed） | **PASS** | data/b1_m1/sweep_*.jsonl |
+| 强制：延迟-正确率曲线 | 必须 | 已出（单 seed 口径） | 部分 | vis/results_panel.py |
+| 强制：多尺度 vs 单尺度 | 必须 | 10 seed 下 D=500 未见稳定优势 | 部分 | b1_acceptance_report.md §1 |
+| 强制：τe–N 三档拟合 | 必须 | 已扫描但 N≥1000 无区分度，标度律无法拟合 | 部分 | b1_acceptance_report.md §2 |
+| 强制：neuromod 统计等价 | 必须 | 无 Rust/cargo，阻塞 | **FAIL** | b1_acceptance_report.md §5 |
+| 强制：稀疏化 Gini / 有效连接 | 必须 | 已补；无迹组 Δ 精确为 0 | **PASS** | b1_acceptance_report.md §3 |
+| 统计：≥5 seed 分布 / mean±SD | 必须 | 已补 10 seed 与种子级原始值 | **PASS** | b1_acceptance_report.md §1 |
+| 跨基准 6 组消融表 | 缺一不可 | 4 组机制未实现，消融条件无法构造 | **FAIL** | b1_acceptance_report.md §4 |
+
+### B2 · 两关节虚拟臂到达
+
+| 项 | 阈值 / 要求 | 现状 | 状态 | 证据 |
+|---|---|---|---|---|
+| 末端距离中位数 | ≤ 0.20 | 最佳 0.4398（2000 ep）/ 0.4164（全量） | **FAIL** | audit/检测报告.md §5；data_b2/*.csv |
+| 10 seed 中 ≥8 达标 | 8/10 | 0/103 PASS（旧口径） | **FAIL** | judgments.md §6 |
+| <4 cm 成功率单独报告 | 必须 | 未报告 | **FAIL** | data_b2 CSV 无该列 |
+| 随机/多目标泛化单独统计 | 必须 | 103 次有效运行全为固定目标 | **FAIL** | 检测报告 P1；源码现已支持 --random-target |
+| g=0 到达率 | > 0（M2 门槛） | 0 次 | **FAIL** | .workbuddy/memory/2026-11-12.md |
+| 强制：直方图 / 记忆半衰 / 崩溃率 | 必须 | 缺 | **FAIL** | 全仓无产物 |
+| 强制：颗粒层 + er_eligible 泄漏 | 必须 | 缺 | **FAIL** | 全仓无产物 |
+| 强制：≥5 seed Wilcoxon / Cohen's d | 必须 | 缺 | **FAIL** | 未安装 scipy，无检验产物 |
+
+### B3 · 最小陪伴对话循环
+
+| 项 | 阈值 / 要求 | 现状 | 状态 | 证据 |
+|---|---|---|---|---|
+| 规模 | 20,000–50,000 神经元 | 236（教学探针） | **FAIL** | dialog_lab.py --check |
+| 1000 轮留出集一致率 | ≥ 70% | 58.3% | **FAIL** | dialog_lab.py --check（实跑） |
+| 相对基线显著更高 | 固定随机 / 纯 STDP | 有三条基线数值，但无同轮数同口径显著性检验 | 部分 | run_baselines(300 轮) vs run_check(1000 轮) |
+| 校准 ECE | < 0.10 | 0.224（温度 T=32） | **FAIL** | dialog_lab.py --check（实跑） |
+| 睡眠巩固保持率差值 | > 0 | +0.000 | **FAIL** | dialog_lab.py --check（实跑） |
+| 基元库 forge 消融 | 必须 | 缺 | **FAIL** | 全仓无产物 |
+| 条件 B 真实延迟/失败率 | 100–200 轮 | 仅有假服务回归测试，无真机统计 | **FAIL** | tools/test_lmstudio.py / test_dialog_lab.py |
+| 跨基准 6 组消融表 | 缺一不可 | 缺 | **FAIL** | judgments.md §4 |
+
+**判定**：
+
+- **B1 = 不通过**：10 个独立 seed 下 D=200 仅 1/10 达标（mean 21.87%），配对消融平均下降 2.13pp；原「4/4 PASS」来自单 seed=12345，违反 §5「不得只给最好一次」。
+- **B2 = 不通过**：按冻结口径重算 120 个有效 CSV，达标 0 个；最佳 0.4164 仍为阈值 0.20 的 2.1 倍；`g=0` 到达 0 次；随机/多目标泛化、成功率、Wilcoxon 全部未报告。
+- **B3 = 未开始（正式实现）**：教学探针规模 236 神经元、hold 0.583、ECE 0.224、巩固 +0.000，四项硬判据全 FAIL；且 `judgments.md:4` 规定 B1 未通过前不得启动 B3。
+
+### B3 数据口径风险（验证发现）
+
+`run_check(rounds=1000)` 给出 hold=0.583，而 `run_baselines(rounds=300)` 给出 `rstdp=0.625 / stdp_only=0.083 / random_fixed=0.167`。**两组轮数不同，不能据此断言「显著高于基线」**；且判据要求配对显著性检验，当前只有点估计。同理，巩固 `Δ=+0.000` 是探针没有遗忘机制的结果，不是「巩固无效」的因果结论，只能记作未达标。
+
+## 4. 跨基准 6 组强制消融覆盖
+
+| 消融条件 | B1 | B2 | B3 |
+|---|---|---|---|
+| 移除资格迹 | **PASS** | 部分 | 部分 |
+| 移除误差注入通道 | **FAIL** | **FAIL** | **FAIL** |
+| 移除多通道调质 | 部分 | **FAIL** | **FAIL** |
+| 移除异构群体编码 | **FAIL** | **FAIL** | **FAIL** |
+| 移除竞争性神经发生 | **FAIL** | **FAIL** | **FAIL** |
+| 移除睡眠重放 | **FAIL** | **FAIL** | 部分 |
+
+- B1 只有「移除资格迹」有完整 6 档扫描；`abl_noreward`（无奖励调制）只能近似「移除多通道调质」，不能等同（判据要求退化为单通道奖励）。
+- B2 源码 `host_b2/benchmark2_host.cpp` 现已把 `--disable_trace/--disable_reward` 接到 `net.use_eligibility_trace / use_reward_modulation`（11-10 体检记录的「空操作」问题已修），并支持 `--random-target` 与 `target_mode 0/1/2`；但 `data_b2/` 123 个 CSV 仍是固定目标、无配套消融运行。**有能力、无数据**。
+- B3 教学探针有三条基线与巩固探针，但都不是「移除前后」的同口径对照。
+
+## 5. 统计与数据规范符合度（判据 §5 / §0）
+
+| 规范 | 状态 | 实测 |
+|---|---|---|
+| 日志只写 JSONL，CSV 停用并归档 legacy/ | 部分 | B1 新数据 47 个 .jsonl 合规；全仓仍有 208 个 CSV，data/legacy/ 不存在 |
+| 每次运行 meta.json（源码/二进制哈希、seed_bundle、判据版本） | 部分 | 47 个 *.csv.meta.json 有参数与 build 时间，缺源码哈希、二进制哈希、四子种子、判据版本 |
+| 报告 median / mean / SD / 种子级原始值 | **FAIL** | B1 全部 seed=12345；B2 旧实验无 sidecar；均无 mean±SD |
+| 失败运行保留不删除 | **PASS** | 47 组 B1 与 123 个 B2 CSV 均保留（含 1 空、4 截断） |
+| 标准中位数定义（偶数取两项均值） | **PASS** | host_b2/benchmark2_host.cpp 已实现 (ratios[mid-1]+ratios[mid])/2；历史报告仍按旧口径 |
+| 独立脑实例 / 单变量 | **PASS** | b1_sweep.ps1 每条件独立进程；但 6 档延迟共用同一 seed，无法给出种子方差 |
+
+补充说明：全仓 CSV 共 333 个（`data_b2` 123 / `b1_m1` 47 / `multi_seed` 30 / 其他 8），`data/legacy/` 不存在，与 `§5`「CSV 停用、旧格式归档」不符。B1 的 47 个 `.csv.meta.json` 含参数、build 时间与 seed，但缺源码哈希、二进制哈希、`seed_bundle` 四子种子与判据版本。
+
+## 6. 代码、工程与未提交改动
+
+- 最近 10 次提交主线：`9e7ff0c` M0 接口冻结 → `d9c73c1` M1 多尺度迹 → `438aebd` M1 构建信息 → `0c6e073` B1 成果窗口 → `f73375b` 学习接口插件热加载（HEAD）。B2 相关最近一次实质提交仍是 `43787b9`（v16 配置，median 0.50）。
+- 当日新增但未入库的成果：G 退火同步与 G 曲线、训练快照 `training_store.py` / `training_panel.py`、LM Studio 接口/插件/聊天窗口、B3 教学探针 `dialog_lab.py`、三个回归测试与四张预览图；下表清单另含本报告的生成脚本与两份报告文件。这些是**工作区状态**，不在任何提交里，存在丢失风险。
+
+| 类型 | 数量 | 清单 |
+|---|---|---|
+| 已跟踪修改 | 7 | .gitignore, .workbuddy/memory/2026-11-12.md, Experiment/brain/benchmark1_core.c, Experiment/host/benchmark1_host.cpp, Experiment/logs/benchmark1_diagnostic.txt, Experiment/spec/judgments.md, Experiment/vis/neuron_vis.py |
+| 未跟踪文件 | 21 | Experiment/audit/b1_acceptance_report.md, Experiment/audit/b1_acceptance_summary.jsonl, Experiment/audit/legacy_csv_manifest.md, Experiment/audit/progress_review_2026-11-12.html, Experiment/audit/progress_review_2026-11-12.md, Experiment/tools/b1_acceptance.py, Experiment/tools/gen_progress_report.py, Experiment/tools/test_dialog_lab.py, Experiment/tools/test_lmstudio.py, Experiment/tools/test_training_store.py, Experiment/vis/chat_panel.py, Experiment/vis/dialog_lab.py, Experiment/vis/guidance_monitor.py, Experiment/vis/learning_plugins/lmstudio.py, Experiment/vis/lmstudio_client.py, Experiment/vis/preview_chat.png, Experiment/vis/preview_dialog.png, Experiment/vis/preview_guidance.png, Experiment/vis/preview_training.png, Experiment/vis/training_panel.py, Experiment/vis/training_store.py |
+
+另有已确认的工程限制：C DLL 后端只有读权重接口、无写权重 API，训练快照必须切到 numpy/CUDA 向量化后端（`vis/training_store.py` 明确拒绝并给出提示）；本机未安装 `scipy`，B2 的 Wilcoxon / Cohen's d 检验当前无法执行。
+
+## 7. 关键负结果（避免重踩）
+
+| 结论 | 证据 | 对进度的影响 |
+|---|---|---|
+| `g>0` 的到达不算网络能力；引导消融 g=0 → 0 次到达、g=1.0 → 9 次/206 tick | memory 11-12；设计大纲 §2.3 | B2 的「成功率」必须按 g=0 重做 |
+| 标量误差注入单调劣化（median 0.947→3.27），gain≥0.5 时 42–54% 突触触底 | 设计大纲 §2.3 | 缺的是可学习内部正向模型（T1），不是注入通路 |
+| k-WTA 解码下 ω 零均值抖动、无朝目标直流分量 | 设计大纲 §2.3 | 需 PDc 群体解码（T2），先做离线监督上界 |
+| B3 第一版只接标量奖励 1000 轮完全不收敛（hold 0.167） | memory 11-12；dialog_lab.py | 资格迹对全标签近似相同，标量奖励无法区分通路；改为 k-WTA + 标签竞争 + 老师标签蒸馏后才学会 |
+| B1 三个实现 bug 曾让 100% 成为假象（延迟用 trial 局部 tick、PSP=25 饱和、K=1 未归一化 α） | judgments.md §6 修复记录 | 任何 B1 结论必须绑定 `d9c73c1` 之后的版本 |
+
+## 8. 建议优先级（按判据排序）
+
+1. **P0 · 提交当日工作区成果**：把 7 个已跟踪修改与 21 个未跟踪文件入库，避免 G 退火/持久化/对话探针成果丢失。这不改变任何判据状态。
+2. **P0 · 按 §1 失败动作停止并转 T1/T2 研究**：本轮已补齐种子分布/稀疏化/τe–N 探索扫描，但核心判据仍不通过；不得继续推进 B2 探针。先查清输出层固定偏向与刺激—投票映射，重做实验设计并落实独立「试次顺序」随机流。
+3. **P0 · 修 meta sidecar**：补源码哈希、二进制哈希、`seed_bundle` 四子种子、判据版本；把 208 个 CSV 归档到 `data/legacy/`，新数据只写 JSONL。
+4. **P1 · B1 未通过前禁止启动 M2 探针**（以下为解除阻塞后的方案，本轮不执行）：5000 神经元、异构输出 + 群体解码 + 势能塑形，10 seed 固定 1200 tick、随机目标，门槛 ≥6/10 median ≤0.4 且 `g=0` 到达率 >0；未达则回 T1/T2，不上结构可塑。先做离线监督上界确认架构表达力。
+5. **P2 · B3 保持教学定位**：`dialog_lab.py` 继续标注「不计入验收」；待 B1 完整通过、M2 过门槛后按 M4 正式实现 20k–50k 网络、独立校准集、forge 消融、条件 B 100–200 轮真实延迟/失败率统计。
+
+**明确不要做**：不要宣布「B1 已通过」或「B3 已启动/通过」；不要把教学探针的 0.583 与冻结判据 0.70 混写；不要用 `g>0` 到达率替代 `g=0` 能力；不要在消融表缺失时进入 B2 结构可塑开发。
+
+## 9. 数据验证发现：B2 唯一「达标」运行被判据排除
+
+按 `§0.4` 剔除 `init_dist < 0.10` 的 94 条 episode、用标准中位数定义重算后，121 个 CSV 中出现 1 次 `median ≤ 0.20`：`v7_headless_guided.csv`（0.1087，5 条有效 episode）。
+
+该文件名为 `guided`，且 CSV 带 `arrived / arrival_tick` 列，是 11-11 深夜 v7 DLS 解析引导实验的遗留数据；工作日志记载当时已「量化证明 100% 定向来自解析控制器 → 全链路删除公式并重编译，默认 0 到达」。按 `judgments.md §0.1`「`g>0` 的到达次数不计入能力」，**这类运行不能计入 B2 能力统计**。本报告的 B2 数字、直方图与 KPI 均已按此排除，只保留纯网络运行。
+
+| 被排除运行 | median | 有效 episode | 排除依据 |
+|---|---|---|---|
+| v7_headless_guided.csv | 0.1087 | 5 | §0.1：g>0 引导不计入能力 |
+
+排除后纯网络 **120 次运行、0 次达标**，最佳 0.4164（`results_w25.csv`）。另有 2 个空/不可解析文件按 `§0.4` 与 `§5` 保留但不参与统计。口径提醒：`检测报告.md` 的 0.4164（全量 104 CSV 最优）与 `judgments.md §6` 的 0.4398（2000-episode 子集最优）都基于旧上中位数定义与固定目标，不能当作纯网络能力的严格上界；但也都不能改变「B2 不通过」的结论。
+## 9.1 B1 多种子复核（本次新增，取代 §0/§3 旧结论）
+
+> 依据 `audit/b1_acceptance_report.md`、`audit/b1_acceptance_summary.jsonl`（124 次独立进程实跑）；
+> 冻结判据已追加 `spec/judgments.md §6.1`（v1.1，**阈值零变更**）。
+
+| 项 | 首次对照 | 复核结果 | 状态 |
+|---|---|---|---|
+| D=200 正确率 | 100.0%（seed=12345） | 10 seed：mean 21.87% / median 5.00% / **1/10** 达标 | **FAIL** |
+| 无迹消融下降 | 53.3pp | 10 配对 seed：D=200 平均 2.13pp（SD 18.16） | **FAIL** |
+| τe–N 标度 | 缺 | N=500/1000/2000 × 6 档 τ 已扫；N≥1000 各 τ 全 0%，标度律无法拟合 | PARTIAL |
+| 稀疏化 | 缺 | 诊断层补 Gini / 有效连接数；无迹组 init→final Δ 精确为 0 | PASS |
+| ≥5 seed 分布 | 缺 | 10 seed 的 mean/SD/median 与种子级原始值已出 | PASS |
+| neuromod 交叉 | 缺 | 本机无 Rust/cargo，参考实现无法构建 | 阻塞 |
+| 6 组消融 | 1 组完整 | 4 组机制未实现，消融条件无法构造 | FAIL |
+
+**用同一二进制复跑 seed=12345 仍得 100%**，确认历史结论是「只报最好一次」的口径问题，
+不是代码回归；判据 §0.6 与 §5 明确要求种子分布且不得只给最好一次。
+
+**结论：B1 不通过。** 按 §1 失败动作：**停止，转 T1/T2 研究（前向模型、解码可学性），不得进入 B2**。
+本轮未改任何阈值，也未改学习规则或刺激生成器去「刷过」判据。
+
+**修订后的优先级**：① P0 提交当日成果；② P0 停止 B2 推进，查输出层固定偏向与刺激—投票映射，
+重做 B1 实验设计并落实独立试次顺序随机流；③ P1 安装 Rust 工具链补 neuromod 对照、
+明确 §4 六组消融在 B1 的适用口径；④ P2 把 τe–N 扩到 ≥5 seed 并固定 `avg_conn` 后重跑；
+⑤ P3 B3 保持教学定位，不计入验收。
+
+注意：M1 完成度上升是因为**强制报告交付物**补齐，不代表 B1 判据通过；完成度是覆盖率，不是通过率。
+
+## 10. 复现方式
+
+```
+py -3 Experiment/tools/gen_progress_report.py   # 重建本报告与 HTML 可视化
+py -3 Experiment/vis/dialog_lab.py --check --rounds 1000  # B3 探针实测
+py -3 Experiment/tools/b1_report.py               # B1 sweep 汇总
+git --no-pager log -30 --oneline; git status --short
+```
+
+*本报告只陈述可核对事实；完成度为交付物覆盖率，不代表判据通过。判据以 `spec/judgments.md` 冻结 v1 为准。*

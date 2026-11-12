@@ -737,17 +737,51 @@ double net_read_output_b_rate(NetworkState* net) {
 /* ============================================================
  * 诊断接口
  * ============================================================ */
+static int _cmp_abs_weight(const void* a, const void* b) {
+    double x = *(const double*)a, y = *(const double*)b;
+    return (x > y) - (x < y);
+}
+
 void net_dump_weight_stats(NetworkState* net, FILE* fp) {
-    double w_sum = 0, w_min = 1e9, w_max = -1e9;
-    int s;
-    for (s = 0; s < net->synapse_count; s++) {
+    int n = net->synapse_count, s;
+    double w_sum = 0, w_sq = 0, w_min = 1e9, w_max = -1e9;
+    double* sorted = n > 0 ? (double*)malloc(sizeof(double) * (size_t)n) : NULL;
+    for (s = 0; s < n; s++) {
         double w = net->synapses[s].weight;
-        w_sum += w;
+        double a = fabs(w);
+        w_sum += a;
+        w_sq += a * a;
         if (w < w_min) w_min = w;
         if (w > w_max) w_max = w;
+        if (sorted) sorted[s] = a;
     }
     fprintf(fp, "Weight stats: count=%d mean=%.4f min=%.4f max=%.4f\n",
-            net->synapse_count, w_sum / net->synapse_count, w_min, w_max);
+            n, n > 0 ? w_sum / n : 0.0, w_min, w_max);
+
+    double gini = 0.0, effective = 0.0, mean = n > 0 ? w_sum / n : 0.0;
+    double p10 = 0.0, p50 = 0.0, p90 = 0.0;
+    int active = 0, sat_hi = 0, sat_lo = 0;
+    if (sorted && n > 0) {
+        qsort(sorted, (size_t)n, sizeof(double), _cmp_abs_weight);
+        double weighted = 0.0;
+        for (s = 0; s < n; s++) {
+            weighted += (double)(s + 1) * sorted[s];
+            if (sorted[s] > 0.5 * mean) active++;
+            if (sorted[s] >= 0.99 * WEIGHT_MAX) sat_hi++;
+            if (sorted[s] <= 1.01 * WEIGHT_MIN) sat_lo++;
+        }
+        if (w_sum > 0.0) {
+            gini = 2.0 * weighted / ((double)n * w_sum) - ((double)n + 1.0) / (double)n;
+            effective = w_sum * w_sum / (w_sq > 0.0 ? w_sq : 1.0);
+        }
+        p10 = sorted[(n - 1) / 10];
+        p50 = sorted[(n - 1) / 2];
+        p90 = sorted[(n - 1) * 9 / 10];
+    }
+    fprintf(fp, "Weight sparsity: gini=%.4f effective=%.1f active=%d/%d "
+                 "p10=%.4f p50=%.4f p90=%.4f sat_hi=%d sat_lo=%d\n",
+            gini, effective, active, n, p10, p50, p90, sat_hi, sat_lo);
+    if (sorted) free(sorted);
 }
 
 void net_dump_trace_stats(NetworkState* net, FILE* fp) {

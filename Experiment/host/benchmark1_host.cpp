@@ -62,6 +62,7 @@ void print_usage(const char* prog) {
     printf("  --learning-rate X  Override reward-modulated learning rate\n");
     printf("  --disable_trace     Disable eligibility trace (ablation)\n");
     printf("  --disable_reward    Disable reward modulation (ablation)\n");
+    printf("  --diag FILE         Weight/trace diagnostic log path\n");
 }
 
 int main(int argc, char* argv[]) {
@@ -69,6 +70,7 @@ int main(int argc, char* argv[]) {
     std::string out_file = "data/benchmark1_results.csv";  /* 相对 Experiment 目录 */
     std::string jsonl_path;
     std::string tag = "default";
+    std::string diag_path = "logs/benchmark1_diagnostic.txt";
     bool force_no_trace = false;
     bool force_no_reward = false;
     int trace_k = 3;
@@ -98,6 +100,7 @@ int main(int argc, char* argv[]) {
         else if (arg == "--out") { if (i+1 < argc) out_file = argv[++i]; }
         else if (arg == "--jsonl") { if (i+1 < argc) jsonl_path = argv[++i]; }
         else if (arg == "--tag") { if (i+1 < argc) tag = argv[++i]; }
+        else if (arg == "--diag") { if (i+1 < argc) diag_path = argv[++i]; }
         else if (arg == "--trace-k") next(trace_k);
         else if (arg == "--learning-rate") { if (i+1 < argc) learning_rate_override = atof(argv[++i]); }
         else if (arg == "--psp-factor") { if (i+1 < argc) psp_override = atof(argv[++i]); }
@@ -156,7 +159,17 @@ int main(int argc, char* argv[]) {
     if (force_no_reward) net.use_reward_modulation = 0;
     
     printf("Network initialized: %d neurons, %d synapses\n", net.neuron_count, net.synapse_count);
-    
+
+    /* 初始化快照：稀疏化判据需要训练前的 Gini / 有效连接数基线 */
+    FILE* diag_init = fopen(diag_path.c_str(), "w");
+    if (diag_init) {
+        fprintf(diag_init, "=== Benchmark-1 init snapshot ===\n");
+        fprintf(diag_init, "seed=%u neurons=%d synapses=%d trace_k=%d\n",
+                cfg.seed, net.neuron_count, net.synapse_count, net.hp.trace_k);
+        net_dump_weight_stats(&net, diag_init);
+        fclose(diag_init);
+    }
+
     /* 打开CSV输出 */
     FILE* fp = fopen(out_file.c_str(), "w");
     if (!fp) {
@@ -377,9 +390,9 @@ int main(int argc, char* argv[]) {
     printf("Output file:       %s\n", out_file.c_str());
     
     /* 诊断信息 */
-    FILE* diag = fopen("logs/benchmark1_diagnostic.txt", "w");  /* 相对 Experiment 目录 */
+    FILE* diag = fopen(diag_path.c_str(), "a");
     if (diag) {
-        fprintf(diag, "=== Benchmark-1 Diagnostic Log ===\n");
+        fprintf(diag, "\n=== Benchmark-1 final snapshot ===\n");
         fprintf(diag, "Timestamp: %s\n", __DATE__ " " __TIME__);
         fprintf(diag, "Config: S_A=%d S_B=%d H=%d O_A=%d O_B=%d Delay=%d Trials=%d Seed=%u\n",
                 cfg.sensory_a, cfg.sensory_b, cfg.hidden, cfg.output_a, cfg.output_b,
