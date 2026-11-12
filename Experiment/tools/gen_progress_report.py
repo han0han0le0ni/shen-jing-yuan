@@ -445,7 +445,8 @@ def build_markdown(b1_series, b2_rows, b2_empty, b2_invalid, b3, statuses, figs)
          (b3_hold, b3_ece, b3_neurons, b3["delta"] if b3 else "+0.000"),
          "≥0.70 / <0.10 / 20k–50k / >0", "FAIL（且不计入验收）"],
         ["未提交改动", "%d 个已跟踪修改 + %d 个未跟踪文件" % (len(modified), len(untracked)),
-         "—", "风险：当日成果未入库"],
+         "—", ("风险：当日成果未入库" if (modified or untracked)
+               else "已入库，工作区干净（不含本报告产物）")],
     ]))
     s.append("")
     s.append("## 1. 计分口径与证据来源")
@@ -717,8 +718,10 @@ def build_html(figs, md_text, b2_rows, b2_empty, b2_invalid, b3, statuses):
         ("B2 达标运行", "%d / %d" % (pass_cnt, len(b2_rows)), "var(--bad)",
          "最佳 median %.4f" % (best["median"] if best else float("nan"))),
         ("B3 留出集", "%.1f%%" % (b3_hold * 100), "var(--bad)", "判据 ≥70%%，探针 %.1f%%" % (b3_hold * 100)),
-        ("未提交成果", "%d 项" % (len(modified) + len(untracked)), "var(--warn)",
-         "%d 修改 + %d 未跟踪" % (len(modified), len(untracked))),
+        ("未提交成果", "%d 项" % (len(modified) + len(untracked)),
+         "var(--warn)" if (modified or untracked) else "var(--ok)",
+         ("%d 修改 + %d 未跟踪" % (len(modified), len(untracked))) if (modified or untracked)
+         else "已入库，工作区干净"),
     ]
     for label, v, col, sub in kpis:
         parts.append("<div class='kpi'><div class='l'>%s</div><div class='v' style='color:%s'>%s</div>"
