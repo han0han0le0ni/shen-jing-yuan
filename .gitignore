@@ -71,3 +71,6 @@ Experiment/data/b1_t1/
 
 # B1 通路选择性第三因子实验原始数据（可复现：tools/b1_pathway_selectivity.py）
 Experiment/data/b1_psel/
+
+# B1 可学习内部前向模型实验原始数据（可复现：tools/b1_forward_model.py）
+Experiment/data/b1_fwd/

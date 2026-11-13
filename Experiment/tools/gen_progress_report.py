@@ -410,7 +410,7 @@ def build_markdown(b1_series, b2_rows, b2_empty, b2_invalid, b3, statuses, figs)
     s = []
     s.append("# 研发进度对照报告 · %s" % STAMP)
     s.append("")
-    s.append("> 依据：`spec/judgments.md` 冻结 v1.6（§0 全局口径 / §1–3 判据 / §4 六组消融 / §5 统计规范 / §6.1–6.6 现状复核；阈值零变更）、"
+    s.append("> 依据：`spec/judgments.md` 冻结 v1.7（§0 全局口径 / §1–3 判据 / §4 六组消融 / §5 统计规范 / §6.1–6.7 现状复核；阈值零变更）、"
              "`audit/NeuralOS_设计大纲与开发计划_2026-11-12.md`（M0–M6 计划）、"
              "`audit/b1_m1_report.md`、`audit/检测报告.md`、`.workbuddy/memory/2026-11-12.md`、"
              "`data/b1_m1/*.jsonl`、`data_b2/*.csv`、实跑 `dialog_lab.py --check`、`git log/status`。")
@@ -609,7 +609,7 @@ def build_markdown(b1_series, b2_rows, b2_empty, b2_invalid, b3, statuses, figs)
     s.append("git --no-pager log -30 --oneline; git status --short")
     s.append("```")
     s.append("")
-    s.append("*本报告只陈述可核对事实；完成度为交付物覆盖率，不代表判据通过。判据以 `spec/judgments.md` 冻结 v1.6 为准（阈值零变更）。*")
+    s.append("*本报告只陈述可核对事实；完成度为交付物覆盖率，不代表判据通过。判据以 `spec/judgments.md` 冻结 v1.7 为准（阈值零变更）。*")
     return "\n".join(s)
 
 
@@ -701,7 +701,7 @@ def build_html(figs, md_text, b2_rows, b2_empty, b2_invalid, b3, statuses):
            C["ok"], C["warn"], C["bad"]))
     parts.append("</style></head><body><div class='wrap'>")
     parts.append("<header><h1>研发进度对照报告</h1>")
-    parts.append("<div class='sub'>%s · 依据 <code>spec/judgments.md</code> 冻结 v1.6（阈值零变更） · "
+    parts.append("<div class='sub'>%s · 依据 <code>spec/judgments.md</code> 冻结 v1.7（阈值零变更） · "
                  "全部数字来自仓库数据 / 实跑 / git 状态 · "
                  "生成脚本 <code>Experiment/tools/gen_progress_report.py</code></div></header>" % STAMP)
 
@@ -812,7 +812,7 @@ def build_html(figs, md_text, b2_rows, b2_empty, b2_invalid, b3, statuses):
 
     parts.append("<footer>本报告只陈述可核对事实；完成度为交付物覆盖率，不代表判据通过。"
                  "复现：<code>py -3 Experiment/tools/gen_progress_report.py</code> · "
-                 "判据以 <code>spec/judgments.md</code> 冻结 v1.6 为准 · 生成于 %s</footer>" % date.today().isoformat())
+                 "判据以 <code>spec/judgments.md</code> 冻结 v1.7 为准 · 生成于 %s</footer>" % date.today().isoformat())
     parts.append("</div><script>%s</script></body></html>" % get_plotlyjs())
     return "".join(parts)
 
@@ -915,18 +915,19 @@ def apply_b1_review(md, html):
          "与 `neuromod` 同种子统计等价（均值/方差/迹曲线，不追 1e-4）、稀疏化 Gini/有效连接数、"
          "≥5（优先 10）seed 的 mean±SD 与种子级原始值、6 组跨基准消融表。",
          "2. **P0 · 按 §1 失败动作停在 T1/T2**（进行中）：四流契约、根因诊断、离线监督上界、"
-         "严格对称读出（约束 ①②③）、T1 两必要条件析因均已完成；附录 G.4「通路选择性"
-         "第三因子」已由 §9.5 销项（257 条记录 / 10 seed，主实验 g=0 全 0%、配对 0.00pp）。"
-         "主因定位为核心 `reward_baseline` 饱和 −0.997 使 `reward_error` 趋零；"
-         "下一步按冻结判据 §6.6 转向「可学习内部前向模型 + 修复奖励基线口径」。"
-         "不得继续推进 B2 探针。"),
+         "严格对称读出（约束 ①②③）、T1 两必要条件析因、附录 G.4 与 H.4 下一步"
+         "均已完成（§9.5 / §9.6，共 451 条记录）；可学习内部前向模型已用三个在线"
+         "可学习量替换结构先验、人工方向与饱和基线，但主实验 2×2 仍全 0%、"
+         "配对 0.00pp。瓶颈定位在自监督读出：Oja 主成分不是刺激判别方向，"
+         "且破缺前结果反馈不含刺激信息。下一步按冻结判据 §6.7 寻找「不依赖外部"
+         "标签且指向任务语义的自监督目标」。不得继续推进 B2 探针。"),
         ("4. **P1 · 才允许启动 M2 探针**：",
          "4. **P1 · B1 未通过前禁止启动 M2 探针**（以下为解除阻塞后的方案，本轮不执行）："),
         ("因此 B1 目前只能写作「核心数值达标 / 完整验收阻塞」。",
          "但深夜多种子复核已判 **B1 不通过**，按 §1 失败动作应停止并转 T1/T2 研究（见 §9.1）。"),
         ("**该文档需标注为 v1.0 历史快照**，进度以本报告的证据链为准。",
          "**该文档与 §6 原表均视为历史快照**：桌面原件与 audit 副本已追加附录 D（v1.1）、E（v1.2）、"
-         "F（v1.3）、G（v1.4）、H（v1.5），进度以冻结判据 v1.6 §6.1–6.6 与本报告 §9.1/§9.2/§9.3/§9.4/§9.5 为准。"),
+         "F（v1.3）、G（v1.4）、H（v1.5）、I（v1.6），进度以冻结判据 v1.7 §6.1–6.7 与本报告 §9.1/§9.2/§9.3/§9.4/§9.5/§9.6 为准。"),
         ("M1 已实现多尺度迹并把 B1 核心判据拉到通过。",
          "M1 已实现多尺度迹并一度把 B1 核心判据判为通过（单 seed 口径；深夜多种子复核已推翻，见 §9.1）。"),
     ]
@@ -946,15 +947,16 @@ def apply_b1_review(md, html):
         ("<b>P0 补齐 B1 完整验收</b>：τe–N 三档 + 指数拟合、neuromod 同种子统计等价、"
          "稀疏化 Gini/有效连接、≥5（优先 10）seed 的 mean±SD 与种子级原始值、6 组消融表。",
          "<b>P0 按 §1 失败动作停在 T1/T2</b>：四流契约、根因诊断、离线监督上界、严格对称读出"
-         "（约束 ①②③）、T1 两必要条件析因均已完成；附录 G.4「通路选择性第三因子」"
-         "已由 §9.5 销项（257 条记录 / 10 seed，主实验 g=0 全 0%、配对 0.00pp）。"
-         "主因定位为核心 <code>reward_baseline</code> 饱和 −0.997；下一步按 §6.6 转向"
-         "「可学习内部前向模型 + 修复奖励基线口径」。不得推进 B2。"),
+         "（约束 ①②③）、T1 两必要条件析因、附录 G.4 与 H.4 下一步均已完成"
+         "（§9.5 / §9.6，共 451 条记录）；可学习内部前向模型已替换三个人工成分，"
+         "主实验 2×2 仍全 0%、配对 0.00pp。瓶颈在自监督读出：Oja 主成分不是刺激"
+         "判别方向。下一步按 §6.7 寻找「不依赖外部标签且指向任务语义的自监督目标」。"
+         "不得推进 B2。"),
         ("<b>P1 才启动 M2 探针</b>：",
          "<b>P2 B1 未通过前禁止启动 M2 探针</b>（以下为解除阻塞后的方案，本轮不执行）："),
         ("与冻结判据 §6 已推翻前三项。该文档应标注为 v1.0 历史快照，进度以本报告证据链为准。</div>",
          "但 §6 原表的「B1 核心判据通过」又因单 seed 口径被 §6.1 复核推翻。"
-         "桌面原件与 audit 副本已追加附录 D/E/F/G/H；进度以冻结判据 v1.6 §6.1–6.6 与本报告第 9 节为准。</div>"),
+         "桌面原件与 audit 副本已追加附录 D/E/F/G/H/I；进度以冻结判据 v1.7 §6.1–6.7 与本报告第 9 节为准。</div>"),
     ]
     for old, new in md_pairs:
         assert old in md, "md 复核替换未命中：" + old[:36]
@@ -1112,6 +1114,39 @@ def apply_b1_review(md, html):
 与人工方向，任务定义偏离 B1，即使 40pp 可归因也**不构成 B1 通过**；诊断组、方向
 对照、基线补偿组一律不计入验收。**B1 仍不通过**，不进 B2、不写容器、不写 SNC。
 
+## 9.6 可学习内部前向模型（附录 H.4 销项，B1 仍不通过）
+
+> 依据 `audit/b1_learnable_forward_model_2026-11-13.md`、
+> `data/b1_fwd/fwd_summary.jsonl`（194 条 / 10 seed / 300 试次，可复算）；
+> 冻结判据已追加 `spec/judgments.md §6.7`（v1.7，**阈值零变更**）。
+> 新增 `brain/benchmark1_fwd.c` → `b1_fwd.dll`，只链接既有 `b1_core.o` /
+> `seed_bundle.o`；核心 `benchmark1_core.c` SHA1 仍为 `c8de144f…`。
+
+按附录 H.4，用三个**在线可学习**的内部量替换附录 H 的三个人工成分：
+Oja 自监督读出 `v`（替代结构先验 `d_raw`）、actor 系数 `theta`（替代人工
+方向反转）、critic 基线 `b` / 优势 `A`（替代饱和的 `reward_baseline`）。
+门控仍只改 `Synapse.e[]`，保留 §6.6 的每试次清迹 + ±5 截断。
+
+| 项 | 实测（g=0） | 结论 |
+|---|---|---|
+| 主实验 2×2（Oja × 优势，10 seed） | 四组全部 **0.00%**、A/B 分布差 0.000 | **FAIL** |
+| 主归因判据 | 同 seed「完整 − 无迹」**0.00pp**（要求 ≥30pp） | **FAIL** |
+| 学习动态 | Oja `z` 的 A/B 差 **0.071**、`theta` 位移 0.033、优势幅度 0.063 | 三个量都未学到任务相关方向 |
+| 瓶颈对照 `prior_z`（不计入验收） | `z_stim_gap = 1.994`、g=0 **15.00 ± 33.75%**、2/10 seed 有提升 | 瓶颈**主要在自监督读出** |
+| 瓶颈对照 `no_critic`（不计入验收） | g=0 0.00%，优势幅度保持 1.0 仍无提升 | 排除优势幅度不足 |
+| 零星提升 | 恒定 / shuffle `z`、D=500、四流 weight 覆盖等 5%–33% 零散数值 | 随机破缺、未配对归因，不计入验收 |
+
+**结论（比 §9.5 更进一层）**：H.4 的三个人工成分已全部替换为可学习量，
+仍不足以让局部 R-STDP 在 B1 结果反馈口径下学出映射。瓶颈精确定位为
+**自监督读出**：Oja 第一主成分不是刺激判别方向 —— §6.3 的「hidden 线性
+可分 10/10」只说明信息存在，不等于「PCA 可提取」。更根本地，破缺之前
+结果反馈恒为负 / 平局、不含刺激信息，「hidden 自监督表示」与「该选哪个
+输出」之间**缺少可学习的桥接目标**。
+
+下一步：寻找既不依赖外部标签、又能指向任务语义的自监督目标（例如预测
+自身输出层响应或刺激重构），才可能让网络自发破对称；在此之前不谈重做
+B1 正式验收。**B1 仍不通过**，不进 B2、不写容器、不写 SNC。
+
 """
     html_section = f"""<h2>9 · B1 多种子复核（本次新增，取代前文旧结论）</h2>
 <div class='callout bad'><b>B1 不通过。</b>10 个独立 seed 下 D=200 仅 <b>{passed}/{total}</b> 达标
@@ -1215,16 +1250,37 @@ g=0 <b>全部 0.00%</b>、平局率 100%，配对「完整 − 无迹」<b>0.00p
 与 <code>data/b1_psel/psel_summary.jsonl</code>；冻结判据 §6.6（v1.6，阈值零变更）。
 下一步：可学习内部前向模型 + 修复奖励基线口径，回到 host 原口径才谈重做 B1 验收。
 <b>B1 仍不通过</b>，不进 B2、不写容器、不写 SNC。</p>
+<h2>9.6 · 可学习内部前向模型（附录 H.4 销项，B1 仍不通过）</h2>
+<div class='callout bad'><b>B1 仍不通过。</b>194 条记录 / 10 seed 上，主实验 2×2
+四组 g=0 <b>全部 0.00%</b>、配对「完整 − 无迹」<b>0.00pp</b>。三个在线可学习量
+（Oja 自监督读出 / actor 系数 / critic 优势）已替换附录 H 的三个人工成分，
+但仍无归因提升。</div>
+{html_table(["项", "实测", "状态"], [
+    ["主实验 2×2（g=0）", "四组全部 0.00%，A/B 分布差 0.000", badge(0)],
+    ["主归因判据", "同 seed 完整 − 无迹 = 0.00pp（要求 ≥30pp）", badge(0)],
+    ["学习动态", "Oja z 的 A/B 差 0.071、theta 位移 0.033、优势幅度 0.063", badge(0)],
+    ["瓶颈对照 prior_z（不计入验收）", "z_stim_gap 1.994、g=0 15.00±33.75%、2/10 seed 有提升", badge(0.5)],
+    ["瓶颈对照 no_critic（不计入验收）", "g=0 0.00%，排除优势幅度不足", badge(0)],
+    ["零星提升", "恒定/shuffle z、D=500、四流 weight 等未配对归因，不计入验收", badge(0.5)],
+])}
+<p class='note'><b>瓶颈定位：</b>Oja 第一主成分不是刺激判别方向 —— §6.3 的
+「hidden 线性可分 10/10」只说明信息存在，不等于「PCA 可提取」。更根本地，
+破缺之前结果反馈恒为负 / 平局、不含刺激信息，hidden 自监督表示与「该选哪个
+输出」之间<b>缺少可学习的桥接目标</b>。下一步：寻找既不依赖外部标签、又能
+指向任务语义的自监督目标（例如预测自身输出层响应或刺激重构），才可能让
+网络自发破对称。依据 <code>audit/b1_learnable_forward_model_2026-11-13.md</code>
+与 <code>data/b1_fwd/fwd_summary.jsonl</code>；冻结判据 §6.7（v1.7，阈值零变更）。
+<b>B1 仍不通过</b>，不进 B2、不写容器、不写 SNC。</p>
 """
     md = md.replace("## 10. 复现方式", md_section + "## 10. 复现方式")
     html = html.replace("<footer>", html_section + "<footer>")
     assert ("## 9.1 B1 多种子复核" in md and "## 9.2 根因诊断与离线监督上界" in md
             and "## 9.3 严格对称初始读出" in md and "## 9.4 T1 两必要条件析因" in md
-            and "## 9.5 通路选择性第三因子" in md
+            and "## 9.5 通路选择性第三因子" in md and "## 9.6 可学习内部前向模型" in md
             and "9 · B1 多种子复核" in html and "9.2 · 根因诊断与离线监督上界" in html
             and "9.3 · 严格对称初始读出" in html and "9.4 · T1 两必要条件析因" in html
-            and "9.5 · 通路选择性第三因子" in html
-            and "冻结 v1.6" in md and "冻结 v1.6" in html)
+            and "9.5 · 通路选择性第三因子" in html and "9.6 · 可学习内部前向模型" in html
+            and "冻结 v1.7" in md and "冻结 v1.7" in html)
     return md, html
 
 
