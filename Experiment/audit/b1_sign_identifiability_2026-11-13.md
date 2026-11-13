@@ -1,6 +1,6 @@
 # sign(theta) 可辨识性审计（判据 §6.9 遗留问题 / v1.11）
 
-> 生成时间：2026-11-13 20:47 · 数据 `data/b1_sign/sign_summary.jsonl`（60 条 / 10 seed / 300 试次，可复算）
+> 生成时间：2026-11-13 21:05 · 数据 `data/b1_sign/sign_summary.jsonl`（60 条 / 10 seed / 300 试次，可复算）
 > 实验台 `brain/benchmark1_ssp.c` → `b1_ssp.dll`（新增 `b1s_set_theta` / `b1s_struct_probe` / `b1s_drive_gap`）；核心 `benchmark1_core.c` SHA1 `c8de144f0a…` 未改。
 > 强制 theta 只写一个标量、冻结其学习；**不新增学习规则、不改判据阈值**。
 
