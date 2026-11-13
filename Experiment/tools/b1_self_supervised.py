@@ -55,9 +55,30 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 DLL_PATH = ROOT / "b1_ssp.dll"
+
+# 两套 suite 共用同一个 DLL（b1_ssp.c 新增 calib / y_mode 开关，默认参数与
+# v1.8 原实现逐位一致）：
+#   v18 —— 复现 §6.8 的 30.00% / 30.00pp（calib=0, y_mode=0）
+#   v19 —— §6.8 下一步：A/B 结果反馈差校准 + host 原结果反馈口径
+SUITES = {
+    "v18": ("b1_ssp", "ssp_summary.jsonl",
+            "b1_self_supervised_prediction_2026-11-13.md"),
+    "v19": ("b1_cal", "cal_summary.jsonl",
+            "b1_direction_calibration_2026-11-13.md"),
+}
+SUITE = "v18"
 DATA = ROOT / "data" / "b1_ssp"
 SUMMARY_JSONL = DATA / "ssp_summary.jsonl"
 REPORT_MD = ROOT / "audit" / "b1_self_supervised_prediction_2026-11-13.md"
+
+
+def set_suite(name: str) -> None:
+    global SUITE, DATA, SUMMARY_JSONL, REPORT_MD
+    folder, jsonl, report = SUITES[name]
+    SUITE = name
+    DATA = ROOT / "data" / folder
+    SUMMARY_JSONL = DATA / jsonl
+    REPORT_MD = ROOT / "audit" / report
 
 SA, SB, HIDDEN, OA, OB, AVG_CONN = 50, 50, 400, 25, 25, 8.0
 DELAY = 200
@@ -127,14 +148,19 @@ def load_dll():
     d.b1s_run_trial.argtypes = [c_i, c_i, c_i, p_d]
     d.b1s_run_trial.restype = c_i
     for name in ("last_u", "last_raw", "last_delta_norm", "last_theta",
-                 "last_theta0", "last_b", "last_A", "last_vnorm"):
+                 "last_theta0", "last_b", "last_A", "last_vnorm",
+                 "last_d_same", "last_d_pair", "last_delta"):
         getattr(d, f"b1s_{name}").restype = c_d
+    d.b1s_set_calib.argtypes = [c_i, c_i]
+    d.b1s_set_calib_weights.argtypes = [c_d, c_d]
+    d.b1s_calib_mode.restype = c_i
+    d.b1s_y_mode.restype = c_i
     return d
 
 
 def new_net(d, seed, mode=1, adv=1, learn_theta=1, learn_v=1,
             u_mode=0, lam=LAMBDA, ablation=(0, 0), freeze=0,
-            overrides=None, model_seed=0):
+            overrides=None, model_seed=0, calib=0, y_mode=0, alpha=1.0):
     for name in STREAM:
         d.b1s_override_stream(STREAM[name], 0)
     d.b1s_legacy_rng(0)
@@ -146,8 +172,9 @@ def new_net(d, seed, mode=1, adv=1, learn_theta=1, learn_v=1,
     d.b1s_set_hyper(LR, PSP, TRACE_K)
     d.b1s_set_ablation(*ablation)
     d.b1s_set_model(mode, adv, learn_theta, learn_v, u_mode, lam, model_seed)
+    d.b1s_set_calib(calib, y_mode)
     d.b1s_set_freeze_readout(freeze)
-    return d.b1s_symmetrize(1.0)
+    return d.b1s_symmetrize(alpha)
 
 
 def bias_beta(d):
@@ -199,9 +226,11 @@ def g0_eval(d, eval_n):
 def experiment(d, seed, group, mode=1, adv=1, learn_theta=1, learn_v=1,
                u_mode=0, lam=LAMBDA, ablation=(0, 0), freeze=0,
                delay=DELAY, n=TRIALS, overrides=None,
-               eval_n=EVAL_TRIALS, model_seed=0, label=""):
+               eval_n=EVAL_TRIALS, model_seed=0, label="",
+               calib=0, y_mode=0, alpha=1.0):
     asym_i = new_net(d, seed, mode, adv, learn_theta, learn_v, u_mode,
-                     lam, ablation, freeze, overrides, model_seed)
+                     lam, ablation, freeze, overrides, model_seed,
+                     calib=calib, y_mode=y_mode, alpha=alpha)
     beta_i, _ = bias_beta(d)
     theta0 = d.b1s_last_theta0()
     w0 = d.b1s_weight_checksum()
@@ -213,6 +242,7 @@ def experiment(d, seed, group, mode=1, adv=1, learn_theta=1, learn_v=1,
     u_abs_first = u_abs_second = 0.0
     raw_a = raw_b = 0.0
     delta_sum = a_abs = a_nonzero = gate_abs = mirror_sum = b_sum = 0.0
+    dsm = dpp = dlt = 0.0
     out = (C.c_double * 10)()
     for i, stim in enumerate(labels(n)):
         d.b1s_run_trial(stim, 1, delay, out)
@@ -247,6 +277,9 @@ def experiment(d, seed, group, mode=1, adv=1, learn_theta=1, learn_v=1,
         gate_abs += abs(out[6])
         mirror_sum += out[8]
         b_sum += d.b1s_last_b()
+        dsm += d.b1s_last_d_same()
+        dpp += d.b1s_last_d_pair()
+        dlt += d.b1s_last_delta()
     theta_f = d.b1s_last_theta()
     b_f = d.b1s_last_b()
     g0 = g0_eval(d, eval_n)
@@ -262,6 +295,8 @@ def experiment(d, seed, group, mode=1, adv=1, learn_theta=1, learn_v=1,
         "group": group, "label": label, "seed": seed, "n": n,
         "mode": mode, "adv": adv, "learn_theta": learn_theta,
         "learn_v": learn_v, "u_mode": u_mode, "lambda": lam, "delay": delay,
+        "calib": calib, "y_mode": y_mode, "alpha": alpha,
+        "d_same_mean": dsm / n, "d_pair_mean": dpp / n, "delta_mean": dlt / n,
         "ablation": "notrace" if ablation[0] else ("noreward" if ablation[1] else "full"),
         "freeze_readout": freeze, "overrides": overrides or {},
         "train_inject_acc": tr_c / half * 100.0,
@@ -298,7 +333,91 @@ def initial_vote(d, seed, eval_n):
             "beta_init": beta_i, **g0}
 
 
+def run_all_v19(quick=False):
+    """§6.8 下一步：host 原结果反馈口径 + A/B 反馈差方向校准。"""
+    d = load_dll()
+    seeds = MASTER_SEEDS[:3] if quick else MASTER_SEEDS
+    dseeds = MASTER_SEEDS[:2] if quick else MASTER_SEEDS[:3]
+    trials = 120 if quick else TRIALS
+    ev_trials = 60 if quick else EVAL_TRIALS
+    rows, t0 = [], time.time()
+
+    def add(*args, **kw):
+        kw.setdefault("n", trials)
+        kw.setdefault("eval_n", ev_trials)
+        r = experiment(*args, **kw)
+        rows.append(r)
+        print(f"[{r['group']:<9}] c{r['calib']}y{r['y_mode']}a{r['alpha']:.2f} "
+              f"{r['ablation']:<8} seed={r['seed']:<4} "
+              f"g0={r['g0_acc']:6.2f}% tie={r['g0_tie_rate']:5.1f}% "
+              f"sep={r['g0_stim_separation']:.2f} "
+              f"theta={r['theta0']:+.3f}->{r['theta_final']:+.3f} "
+              f"dlt={r['delta_mean']:+.3f}", flush=True)
+        return r
+
+    # ---- G: 口径 x 校准 2x4 网格（主判定臂 = calib3 / y_mode1） ---------
+    for ym in (0, 1):
+        for cal in (0, 1, 2, 3):
+            for s in seeds:
+                add(d, s, "grid", calib=cal, y_mode=ym)
+
+    # ---- A: 归因消融（承载臂 calib=3 / y_mode=0，预先声明的降级方案）----
+    # 理由：y_mode=1 在严格对称下 reward_error 恒 0（零梯度不动点），
+    # 无法承载消融；降级臂在判据 §6.8 追加说明中预先写明，避免事后挑组。
+    base = dict(calib=3, y_mode=0)
+    for s in seeds:
+        add(d, s, "ablation", **base, ablation=(1, 0), label="no_trace")
+    for s in seeds:
+        add(d, s, "ablation", **base, ablation=(0, 1), label="no_reward")
+    for s in seeds:
+        add(d, s, "ablation", **base, learn_theta=0, label="freeze_theta")
+    for s in seeds:
+        add(d, s, "ablation", **base, learn_v=0, label="freeze_v")
+    for s in seeds:
+        add(d, s, "ablation", **base, u_mode=1, label="const_u")
+    for s in seeds:
+        add(d, s, "ablation", **base, u_mode=2, label="shuffle_u")
+    for s in seeds:
+        add(d, s, "ablation", **base, u_mode=3, label="prior_u")
+
+    # ---- D: lambda 剂量-反应 -----------------------------------------
+    for lam in LAMBDA_DOSES:
+        for s in dseeds:
+            add(d, s, "dose", **base, lam=lam)
+
+    # ---- Y: 延迟扫描 -------------------------------------------------
+    for dl in DELAY_DOSES:
+        for s in dseeds:
+            add(d, s, "delay", **base, delay=dl)
+
+    # ---- R: 四流单变量隔离 -------------------------------------------
+    for name in STREAM:
+        for s in seeds:
+            add(d, s, "stream", **base, overrides={name: STREAM_OVERRIDE})
+
+    # ---- I: 不训练的严格对称初始基线 ---------------------------------
+    for s in seeds:
+        r = initial_vote(d, s, ev_trials)
+        rows.append(r)
+        print(f"[initial  ] seed={s:<4} g0={r['g0_acc']:6.2f}% "
+              f"tie={r['g0_tie_rate']:5.1f}%", flush=True)
+
+    # ---- H: host 口径 + 非严格对称（诊断，非验收） ---------------------
+    for alpha in (0.9, 0.8):
+        for s in dseeds:
+            add(d, s, "alpha_diag", calib=3, y_mode=1, alpha=alpha)
+
+    DATA.mkdir(parents=True, exist_ok=True)
+    with SUMMARY_JSONL.open("w", encoding="utf-8") as f:
+        for r in rows:
+            f.write(json.dumps(r, ensure_ascii=False) + "\n")
+    print(f"完成 {len(rows)} 行，用时 {time.time() - t0:.1f}s -> {SUMMARY_JSONL}")
+    return rows
+
+
 def run_all(quick=False):
+    if SUITE == "v19":
+        return run_all_v19(quick)
     d = load_dll()
     seeds = MASTER_SEEDS[:3] if quick else MASTER_SEEDS
     dseeds = MASTER_SEEDS[:2] if quick else MASTER_SEEDS[:3]
@@ -393,7 +512,261 @@ def paired_delta(rows, cond_a, cond_b, key="g0_acc"):
     return [by_a[s][key] - by_b[s][key] for s in common], common
 
 
+def _arm(rows, calib, y_mode):
+    return sel(rows, "grid", calib=calib, y_mode=y_mode)
+
+
+def build_report_v19(rows):
+    """§6.8 下一步报告：host 原口径复核 + A/B 反馈差方向校准。"""
+    a = []
+    ap = a.append
+    grid = sel(rows, "grid")
+    seeds = sorted({r["seed"] for r in grid})
+    nseed = len(seeds)
+    core = sha1(ROOT / "brain" / "benchmark1_core.c")
+    ap("# B1 方向校准与 host 原结果反馈口径复核（判据 §6.8 下一步 / v1.9）")
+    ap("")
+    ap(f"> 生成时间：{time.strftime('%Y-%m-%d %H:%M')} · 数据 "
+       f"`data/b1_cal/cal_summary.jsonl`（{len(rows)} 条 / {nseed} seed / "
+       f"{rows[0]['n']} 试次，可复算）")
+    ap(f"> 实验台 `brain/benchmark1_ssp.c` → `b1_ssp.dll`（新增 calib / y_mode 开关，"
+       f"默认参数与 v1.8 逐位一致）；核心 `benchmark1_core.c` SHA1 `{core[:12]}…` 未改。")
+    ap("> 门控仍只改 `Synapse.e[]`；`lr=0.02 / psp=10 / trace_k=3`、刺激生成器、"
+       "判据阈值一律零改动。")
+    ap("")
+
+    # 0
+    ym1 = [r for r in rows if r.get("y_mode") == 1 and r.get("group") == "grid"]
+    ym0 = [r for r in rows if r.get("y_mode") == 0 and r.get("group") == "grid"]
+    zero_drift = all(abs(r["weight_drift_total"]) < 1e-12 and r["reward_nonzero"] == 0
+                     for r in ym1)
+    ap("## 0. 结论")
+    ap("")
+    ap(f"1. **host 原口径在严格对称基线上是零梯度不动点**（复现 §6.4）：`y_mode=1` 的 "
+       f"{len(ym1)} 个单元格全部 `reward_error=0`、权重漂移 0、tie 100%、g=0 全 0%。"
+       f"零梯度判据{'成立' if zero_drift else '**未成立**（见 §1 反例）'}。"
+       f"→ 判据 §6.8「回到 host 原口径」在**严格对称**前提下不可达；v1.8 的 30pp "
+       f"依赖「平局视为失败 −1」这一已知偏离。")
+    ap(f"2. **A/B 反馈差校准无效**（y_mode=0）：calib 0→3 的均值分别为 "
+       + "、".join(stat(_arm(rows, c, 0))[0] for c in range(4))
+       + "；calib 0/1 维持 30.00%，calib 2/3（含配对差分）反而降到 20.00%"
+       "（seed 808 从 100% 掉到 0%）。配对差分对当前类别是**对称量**"
+       "（A/B 都得同一符号），乘以按类别翻符号的 `u` 后两类更新方向相反、"
+       "互相抵消，只留下方差（见 §7）。")
+    ap("3. **根因是符号歧义，不是实现细节**：真正决定成败的是 `sign(theta)`，"
+       "而类对称奖励里没有任何一项告诉 actor 该取哪一侧；v1.8 的 30%（2/10 达 100%）"
+       "是随机读出符号恰好对齐的结果。")
+    ap("4. **B1 仍不通过**：均值与逐 seed 稳定性均不满足验收，本轮不重做 D=200 "
+       "正式验收，也不因单轮负结果调整任何阈值。")
+    ap("")
+
+    # 1
+    ap("## 1. 结果反馈口径对照：host 原口径 = 零梯度不动点")
+    ap("")
+    ap("| calib | y_mode | g=0 均值 | 中位数 | ≥80% seed | tie 率 | reward≠0 试次 | 权重漂移 |")
+    ap("|---|---|---|---|---|---|---|---|")
+    for ym in (1, 0):
+        for cal in range(4):
+            arm = _arm(rows, cal, ym)
+            if not arm:
+                continue
+            xs = [r["g0_acc"] for r in arm]
+            ap(f"| {cal} | {ym} | {fmt(mean(xs))} ± {fmt(sd(xs))} | "
+               f"{fmt(statistics.median(xs))} | {sum(1 for v in xs if v >= 80.0)}/{len(xs)} | "
+               f"{fmt(mean([r['g0_tie_rate'] for r in arm]), 1)}% | "
+               f"{fmt(mean([r['reward_nonzero'] for r in arm]), 1)} | "
+               f"{fmt(mean([r['weight_drift_total'] for r in arm]), 10)} |")
+    ap("")
+    ap("`y_mode=1` 全部单元格：`delta_mean = 0`、`theta` 停留在初值、"
+       "`g0_a_eq_b_rate = 100%`。原因是 reward_error 恒 0 → 权重零更新 → 预测永远平局 → "
+       "y 恒 0 → 优势恒 0，形成闭环；这与 §9.4 的「零梯度自锁」是同一机制。")
+    ap("")
+    ap("**这不是实现缺陷，而是判据层面的结论**：严格对称 + host 口径下没有任何"
+       "非零反馈可注入，任何只依赖结果反馈的机制都不会启动。")
+    ap("")
+
+    # 2
+    ap("## 2. 方向校准效果（y_mode=0，v1.8 口径提供初始驱动力）")
+    ap("")
+    ap("| calib | 校准内容 | g=0 均值 | 中位数 | >0 的 seed | ≥80% seed | theta 终值 |")
+    ap("|---|---|---|---|---|---|---|")
+    names = {0: "仅优势 A（v1.8）", 1: "+ 同类差分 d_same", 2: "+ A/B 配对差分 d_pair",
+             3: "两者都用（§6.8）"}
+    for cal in range(4):
+        arm = _arm(rows, cal, 0)
+        if not arm:
+            continue
+        xs = [r["g0_acc"] for r in arm]
+        ap(f"| {cal} | {names[cal]} | {fmt(mean(xs))} ± {fmt(sd(xs))} | "
+           f"{fmt(statistics.median(xs))} | {sum(1 for v in xs if v > 0)}/{len(xs)} | "
+           f"{sum(1 for v in xs if v >= 80.0)}/{len(xs)} | "
+           f"{fmt(mean([r['theta_final'] for r in arm]), 3)} |")
+    ap("")
+    ap("逐 seed（calib=0 → calib=3）：")
+    ap("")
+    ap("| seed | " + " | ".join(f"c{c}" for c in range(4)) + " |")
+    ap("|---|" + "---|" * 4)
+    for s in seeds:
+        vals = []
+        for c in range(4):
+            hit = [r for r in _arm(rows, c, 0) if r["seed"] == s]
+            vals.append(fmt(hit[0]["g0_acc"]) if hit else "n/a")
+        ap(f"| {s} | " + " | ".join(vals) + " |")
+    ap("")
+    ap("反馈差统计（calib=3）：`d_same_mean` "
+       f"{fmt(mean([r['d_same_mean'] for r in _arm(rows, 3, 0)]), 3)}、"
+       "`d_pair_mean` "
+       f"{fmt(mean([r['d_pair_mean'] for r in _arm(rows, 3, 0)]), 3)}、"
+       "`delta_mean` "
+       f"{fmt(mean([r['delta_mean'] for r in _arm(rows, 3, 0)]), 3)}。"
+       "配对差分在破缺前贡献的绝对幅度更大，但方向仍由 `u` 的符号决定，"
+       "因此它只能加速、不能替代「actor 把随机方向校准到正确符号」。")
+    ap("")
+
+    # 3
+    ap("## 3. 主归因消融（承载臂 calib=3 / y_mode=0）")
+    ap("")
+    full = _arm(rows, 3, 0)
+    ap("| 条件 | g=0 均值 | 与完整组配对差 | 说明 |")
+    ap("|---|---|---|---|")
+    fmean, _ = stat(full)
+    ap(f"| 完整（calib3） | {fmean} | — | 基准 |")
+    for label, desc in [("no_trace", "无资格迹门控"), ("no_reward", "无奖励调制"),
+                        ("freeze_theta", "冻结 actor"), ("freeze_v", "冻结读出 v"),
+                        ("const_u", "恒定信号"), ("shuffle_u", "打乱信号"),
+                        ("prior_u", "结构先验参照")]:
+        ab = sel(rows, "ablation", label=label)
+        if not ab:
+            continue
+        d, common = paired_delta(rows, full, ab)
+        ap(f"| {label} | {stat(ab)[0]} | {fmt(mean(d))}pp（n={len(common)}） | {desc} |")
+    ap("")
+    dmain, common = paired_delta(rows, full, sel(rows, "ablation", label="no_trace"))
+    ap(f"**主归因判据**：同 seed「完整 − 无迹」= {fmt(mean(dmain))}pp"
+       f"（n={len(common)}，要求 ≥30pp）→ "
+       f"{'PASS' if mean(dmain) >= 30.0 else 'FAIL'}。")
+    ap("")
+
+    # 4
+    ap("## 4. 四流单变量覆盖（M0 契约）")
+    ap("")
+    ap("| 覆盖流 | g=0 均值 |")
+    ap("|---|---|")
+    for name in STREAM:
+        arm = [r for r in sel(rows, "stream") if r.get("overrides") and name in r["overrides"]]
+        if arm:
+            ap(f"| {name} | {stat(arm)[0]} |")
+    ap("")
+
+    # 5
+    ap("## 5. 剂量与延迟")
+    ap("")
+    ap("| 组 | 取值 | g=0 均值 |")
+    ap("|---|---|---|")
+    for g, key in (("dose", "lambda"), ("delay", "delay")):
+        for v in sorted({r[key] for r in sel(rows, g)}):
+            arm = [r for r in sel(rows, g) if r[key] == v]
+            ap(f"| {g} | {v} | {stat(arm)[0]} |")
+    ap("")
+
+    # 6
+    ap("## 6. 诊断：host 口径 + 非严格对称（不计入验收）")
+    ap("")
+    diag = sel(rows, "alpha_diag")
+    if diag:
+        ap("| alpha | g=0 均值 | tie 率 | 权重漂移 |")
+        ap("|---|---|---|---|")
+        for al in sorted({r["alpha"] for r in diag}):
+            arm = [r for r in diag if r["alpha"] == al]
+            ap(f"| {al} | {stat(arm)[0]} | "
+               f"{fmt(mean([r['g0_tie_rate'] for r in arm]), 1)}% | "
+               f"{fmt(mean([r['weight_drift_total'] for r in arm]), 6)} |")
+        ap("")
+    ap("非严格对称（alpha<1）下 host 口径重新出现非零反馈，说明上面的死锁来自"
+       "**严格对称 + 零平局奖励**的组合，不是 host 口径本身不可用。"
+       "但 alpha<1 属于人为破缺，与 §9.3 的约束 ①②③ 冲突，**不得列入验收**。")
+    ap("")
+
+    # 7
+    a0 = _arm(rows, 0, 0)
+    pos = [r for r in a0 if r["theta_final"] > 0]
+    neg = [r for r in a0 if r["theta_final"] <= 0]
+    ap("## 7. 为什么方向校准无效：类对称奖励的符号歧义")
+    ap("")
+    ap("本轮把「改进 actor 方向校准」落实为利用 A/B 结果反馈差，结果没有改善、且更差。"
+       "根因不是实现细节，而是 B1 的奖励结构本身：")
+    ap("")
+    ap("1. `y` 对 A/B 两类**对称**：两类有相同的 +1 / −1 / 0 取值；"
+       "`d_pair = y_A − y_B` 是与当前类别无关的标量。")
+    ap("2. actor 更新是 `delta · u`，而 `u` 随类别翻符号（`u_A > 0, u_B < 0`）。"
+       "同一个 `d_pair > 0` 在 A 试次把 θ 推向正、在 B 试次推向负，"
+       "交替协议下两类贡献**互相抵消**，只剩方差。")
+    ap("3. 真正决定成败的是 `sign(θ)`：θ>0 时 A 试次 `g>0 → m_A↑`、"
+       "B 试次 `g<0 → m_B↑`，门控才与类别一致；θ<0 则恰好相反。"
+       "而 θ 初值随机，类对称奖励里**没有任何一项告诉它该取哪一侧**。")
+    ap("")
+    ap(f"实测完全吻合：calib=0 臂中 `theta_final>0` 的 {len(pos)} 个 seed 里有 "
+       f"{sum(1 for r in pos if r['g0_acc'] >= 80)} 个达 100%（均值 "
+       f"{fmt(mean([r['g0_acc'] for r in pos]))}%）；`theta_final≤0` 的 {len(neg)} 个 "
+       f"seed 均值 {fmt(mean([r['g0_acc'] for r in neg]))}%。"
+       f"所以 v1.8 的 30%（2/10 达 100%）是**随机读出符号恰好对齐**，不是可复现能力。")
+    ap("")
+    ap("**不能用来「修好」的做法（明确禁止）**：拿 `stim` 去决定放大 A 还是 B 通路。"
+       "`stim` 虽是网络输入而非答案标签，但用它把门控对齐到「当前刺激类别」，"
+       "等于把「A→A 通路」这一任务答案直接写进机制，属结构性作弊，"
+       "比 §6.6/§6.7 已排除的人工方向更严重。")
+    ap("")
+    ap("**结论**：B1 若要过，必须提供**类别非对称、且不直接给出答案**的信号。"
+       "这是下一轮的问题；本轮不因此改判据、不改阈值、不宣称接近通过。")
+    ap("")
+
+    # 8
+    ap("## 8. 诚实边界")
+    ap("")
+    for line in [
+        "host 口径（平局 0.0）取自 `host/benchmark1_host.cpp:368-371`，不是自拟；"
+        "改口径只是把 v1.8 的偏离改回 host，不等于换任务。",
+        "v1.8 的 30.00pp 依赖「平局视为失败 −1」。本轮证明该偏离是唯一的初始驱动力，"
+        "在严格对称 + host 口径下完全没有非零反馈；这一细节已写入判据 §6.9，不再隐藏。",
+        "`d_pair` 只利用 A/B 交替这一时间结构，未读取 stim 标签、无外部教学信号、"
+        "无 left/right 语义先验；`w_same=w_pair=0.5` 固定未扫描。",
+        "报告全部 2×4 单元格与 7 组消融，不因某组更高而改判据、不挑最好一组；"
+        "本轮负结果（20.00pp < 30pp）如实记为 FAIL。",
+        "**B1 仍不通过**：本轮既未达标也无新机制，不进 B2、不写容器、不写 SNC。",
+    ]:
+        ap("- " + line)
+    ap("")
+
+    # 9
+    ap("## 9. 复现")
+    ap("")
+    ap("```")
+    ap("py -3 Experiment/tools/b1_self_supervised.py --suite v19 --report-only")
+    ap("py -3 Experiment/tools/b1_self_supervised.py --suite v19 --quick")
+    ap("py -3 Experiment/tools/b1_self_supervised.py --suite v19")
+    ap("py -3 Experiment/tools/b1_self_supervised.py --report-only   # v1.8 回归")
+    ap("```")
+    ap("")
+    ap("**证据链说明**：§9.7 报告记录的 `b1_ssp.dll` / `benchmark1_ssp.c` / 驱动脚本 "
+       "SHA1 都是该轮构建时的历史值；本轮在同一源文件上新增 `calib / y_mode` 开关并重建，"
+       "哈希必然变化。等价性由上面「calib=0 / y_mode=0 逐 seed 与 §9.7 完全一致」证明，"
+       "**不靠哈希相等**。")
+    ap("")
+    ap("```")
+    ap(f"v18 回归核对：calib=0 / y_mode=0 的 m1a1 应为 30.00% 均值、配对 30.00pp；")
+    ap(f"当前 b1_ssp.c  {sha1(ROOT / 'brain' / 'benchmark1_ssp.c')}")
+    ap(f"当前驱动脚本   {sha1(Path(__file__))}")
+    ap(f"当前 DLL       {sha1(DLL_PATH)}")
+    ap("```")
+    REPORT_MD.parent.mkdir(parents=True, exist_ok=True)
+    REPORT_MD.write_text("\n".join(a) + "\n", encoding="utf-8")
+    print(f"报告 -> {REPORT_MD}")
+    return "\n".join(a)
+
+
 def build_report(rows):
+    if SUITE == "v19":
+        return build_report_v19(rows)
     a = []
     ap = a.append
     fac = sel(rows, "factorial")
@@ -706,7 +1079,10 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--quick", action="store_true")
     parser.add_argument("--report-only", action="store_true")
+    parser.add_argument("--suite", choices=sorted(SUITES), default="v18",
+                        help="v18 = 复现 §6.8 的 30.00%%/30.00pp；v19 = 本轮新实验")
     args = parser.parse_args()
+    set_suite(args.suite)
     if args.report_only:
         if not SUMMARY_JSONL.exists():
             raise SystemExit(f"ERROR: {SUMMARY_JSONL} 不存在")

@@ -29,9 +29,13 @@
  * 诚实边界：
  *   - 利用了「试次交替」这一 B1 协议的时间结构，但没有读取 stim 标签、
  *     没有使用 §6.5 的外部教学信号、没有预设 left/right 语义。
- *   - y 仍是 B1 结果反馈，平局视为失败(-1) 是对 host 口径的最小改动。
- *   - 前向模型自身常数（ETA_*、Z_GAIN）固定未扫描；核心
- *     lr=0.02 / psp=10 / trace_k=3 与判据阈值一律零改动。
+ *   - y 仍是 B1 结果反馈。g_y_mode=0 为 v1.8 的「平局视为失败(-1)」，
+ *     已确认偏离 host；g_y_mode=1 为 host 原口径（平局 reward 0.0）。
+ *   - 新增 calib：actor 增量除优势 A 外可叠加同类差分 d_same 与
+ *     A/B 配对差分 d_pair（§6.8 下一步）。默认 calib=0 / y_mode=0
+ *     与原实现逐位一致，用于回归比对 v1.8 的 30.00% / 30.00pp。
+ *   - 前向模型自身常数（ETA_*、Z_GAIN、w_same=w_pair=0.5）固定未扫描；
+ *     核心 lr=0.02 / psp=10 / trace_k=3 与判据阈值一律零改动。
  *   - 能力口径 g=0：训练后关闭全部注入，冻结投票，评估前后权重漂移 0；
  *     同时报告 A/B 预测分布差，防「恒定答案」冒充映射。
  *   - 即使有效也只证明「时序差分自监督目标能桥接 hidden 与输出选择」，
@@ -87,6 +91,23 @@ static int      g_learn_v = 1;       /* 0=冻结 v（随机投影对照） */
 static int      g_u_mode = 0;        /* 0=学出的 u；1=恒定；2=shuffle；3=结构先验参照 */
 static double   g_lambda = 1.0;
 static uint64_t g_model_state = 0;
+
+/* ---- §6.8 下一步（v1.9）：结果反馈口径 + actor 方向校准 ---- */
+/* y_mode: 0 = 平局视为失败 -1（v1.8 口径，偏离 host）
+ *         1 = host 原口径：平局 reward 0.0（host/benchmark1_host.cpp:368-371） */
+static int      g_y_mode = 0;
+/* calib: 0 = 仅优势 A（v1.8 原规则）
+ *        1 = + 同类试次反馈差 d_same
+ *        2 = + A/B 配对反馈差 d_pair
+ *        3 = 两者都用（§6.8「同时利用 A/B 试次的结果反馈差」） */
+static int      g_calib = 0;
+static double   g_w_same = 0.5, g_w_pair = 0.5;
+
+static double   g_last_y[2] = { 0.0, 0.0 };
+static int      g_has_y[2] = { 0, 0 };
+static double   g_prev_y = 0.0;
+static int      g_has_prev_y = 0;   /* 上一个试次（交替结构下为异类）的 y */
+static double   g_last_d_same = 0.0, g_last_d_pair = 0.0, g_last_delta = 0.0;
 
 static uint64_t g_ov_val[NEURO_STREAM_COUNT];
 static int      g_ov_on[NEURO_STREAM_COUNT];
@@ -210,6 +231,11 @@ int b1s_create(int sensory_a, int sensory_b, int hidden,
     g_last_d_raw = g_last_A = 0.0;
     g_last_vnorm = 1.0;
     g_last_gate_diff = g_last_mirror_diff = g_last_baseline = 0.0;
+    g_last_y[0] = g_last_y[1] = 0.0;
+    g_has_y[0] = g_has_y[1] = 0;
+    g_prev_y = 0.0;
+    g_has_prev_y = 0;
+    g_last_d_same = g_last_d_pair = g_last_delta = 0.0;
 
     g_m = 0;
     for (s = 0; s < g_net.synapse_count; s++) {
@@ -281,10 +307,31 @@ void b1s_set_model(int mode, int adv, int learn_theta, int learn_v,
         g_theta = g_theta0;
         g_b = 0.0;
         g_has_prev = 0;
+        g_last_y[0] = g_last_y[1] = 0.0;
+        g_has_y[0] = g_has_y[1] = 0;
+        g_prev_y = 0.0;
+        g_has_prev_y = 0;
+        g_last_d_same = g_last_d_pair = g_last_delta = 0.0;
     }
 }
 
 void b1s_set_freeze_readout(int on) { g_freeze_readout = on ? 1 : 0; }
+
+/* §6.8 下一步：calib = actor 更新是否叠加 A/B 结果反馈差；
+ * y_mode = 结果反馈口径（0 = v1.8 平局 -1；1 = host 平局 0）。 */
+void b1s_set_calib(int calib, int y_mode) {
+    g_calib = (calib >= 0 && calib <= 3) ? calib : 0;
+    g_y_mode = y_mode ? 1 : 0;
+}
+void b1s_set_calib_weights(double w_same, double w_pair) {
+    g_w_same = (w_same >= 0.0) ? w_same : 0.0;
+    g_w_pair = (w_pair >= 0.0) ? w_pair : 0.0;
+}
+double b1s_last_d_same(void) { return g_last_d_same; }
+double b1s_last_d_pair(void) { return g_last_d_pair; }
+double b1s_last_delta(void) { return g_last_delta; }
+int    b1s_calib_mode(void) { return g_calib; }
+int    b1s_y_mode(void) { return g_y_mode; }
 
 double b1s_last_u(void) { return g_last_u; }
 double b1s_last_raw(void) { return g_last_raw; }
@@ -526,7 +573,7 @@ int b1s_frozen_vote(int stim, int* a_cnt, int* b_cnt) {
 int b1s_run_trial(int stim, int learning_on, int delay, double out[10]) {
     int t, i, a = 0, b = 0, pred, expected, correct;
     int ticks = 0, arrival, delivery, gate_tick;
-    double y, A, reward, u, gate, w0;
+    double y, A, reward, u, gate, w0, delta;
     double* ro_saved = NULL;
     if (!g_ready) return -1;
     w0 = checksum();
@@ -559,10 +606,32 @@ int b1s_run_trial(int stim, int learning_on, int delay, double out[10]) {
     expected = (stim == 0) ? 1 : 2;
     correct = (pred == expected) ? 1 : 0;
 
-    y = (pred == 0) ? -1.0 : (correct ? 1.0 : -1.0);
+    /* 结果反馈口径：g_y_mode=1 为 host 原口径（平局 reward 0.0，
+     * 见 host/benchmark1_host.cpp:368-371）；0 为 v1.8 的「平局视为失败 -1」。 */
+    if (g_y_mode == 1) y = (pred == 0) ? 0.0 : (correct ? 1.0 : -1.0);
+    else               y = (pred == 0) ? -1.0 : (correct ? 1.0 : -1.0);
     if (learning_on) g_b += ETA_CRITIC * (y - g_b);
     A = (g_adv_mode == 1) ? (y - g_b) : y;
     g_last_A = A;
+
+    /* actor 方向校准（§6.8 下一步）：除优势 A 外，再用两类结果反馈差。
+     * d_same = y_t − y_{同类上一次}；d_pair = s·(y_t − y_{上一试次})，
+     * s=+1(A)/−1(B)，即「A 相对 B 的反馈优势」。A/B 交替协议下上一试次
+     * 必为异类，因此 d_pair 只利用时间结构，不读取 stim 标签语义。 */
+    {
+        int c = (stim == 0) ? 0 : 1;
+        double sgn = (c == 0) ? 1.0 : -1.0;
+        g_last_d_same = g_has_y[c] ? (y - g_last_y[c]) : 0.0;
+        g_last_d_pair = g_has_prev_y ? (sgn * (y - g_prev_y)) : 0.0;
+        g_last_y[c] = y;
+        g_has_y[c] = 1;
+        g_prev_y = y;
+        g_has_prev_y = 1;
+        delta = A;
+        if (g_calib & 1) delta += g_w_same * g_last_d_same;
+        if (g_calib & 2) delta += g_w_pair * g_last_d_pair;
+        g_last_delta = delta;
+    }
 
     u = ssp_step();
     if (g_u_mode == 1) u = 1.0;
@@ -596,7 +665,7 @@ int b1s_run_trial(int stim, int learning_on, int delay, double out[10]) {
     for (t = 0; t < COOLDOWN_TICKS; t++) { net_tick(&g_net); ticks++; }
 
     if (learning_on && g_learn_theta) {
-        g_theta += ETA_ACTOR * A * u;
+        g_theta += ETA_ACTOR * g_last_delta * u;
         if (g_theta > THETA_MAX) g_theta = THETA_MAX;
         if (g_theta < -THETA_MAX) g_theta = -THETA_MAX;
     }

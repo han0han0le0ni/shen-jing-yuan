@@ -77,3 +77,6 @@ Experiment/data/b1_fwd/
 
 # B1 时序差分自预测实验原始数据（可复现：tools/b1_self_supervised.py）
 Experiment/data/b1_ssp/
+
+# B1 方向校准与 host 口径复核原始数据（可复现：tools/b1_self_supervised.py --suite v19）
+Experiment/data/b1_cal/
