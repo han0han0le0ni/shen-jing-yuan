@@ -68,3 +68,6 @@ Experiment/data/b1_sym/
 
 # B1 T1 两必要条件析因实验原始数据（可复现：tools/b1_t1_mechanism.py）
 Experiment/data/b1_t1/
+
+# B1 通路选择性第三因子实验原始数据（可复现：tools/b1_pathway_selectivity.py）
+Experiment/data/b1_psel/
