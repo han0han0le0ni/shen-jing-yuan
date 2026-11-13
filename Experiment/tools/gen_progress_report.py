@@ -410,7 +410,7 @@ def build_markdown(b1_series, b2_rows, b2_empty, b2_invalid, b3, statuses, figs)
     s = []
     s.append("# 研发进度对照报告 · %s" % STAMP)
     s.append("")
-    s.append("> 依据：`spec/judgments.md` 冻结 v1.7（§0 全局口径 / §1–3 判据 / §4 六组消融 / §5 统计规范 / §6.1–6.7 现状复核；阈值零变更）、"
+    s.append("> 依据：`spec/judgments.md` 冻结 v1.8（§0 全局口径 / §1–3 判据 / §4 六组消融 / §5 统计规范 / §6.1–6.8 现状复核；阈值零变更）、"
              "`audit/NeuralOS_设计大纲与开发计划_2026-11-12.md`（M0–M6 计划）、"
              "`audit/b1_m1_report.md`、`audit/检测报告.md`、`.workbuddy/memory/2026-11-12.md`、"
              "`data/b1_m1/*.jsonl`、`data_b2/*.csv`、实跑 `dialog_lab.py --check`、`git log/status`。")
@@ -609,7 +609,7 @@ def build_markdown(b1_series, b2_rows, b2_empty, b2_invalid, b3, statuses, figs)
     s.append("git --no-pager log -30 --oneline; git status --short")
     s.append("```")
     s.append("")
-    s.append("*本报告只陈述可核对事实；完成度为交付物覆盖率，不代表判据通过。判据以 `spec/judgments.md` 冻结 v1.7 为准（阈值零变更）。*")
+    s.append("*本报告只陈述可核对事实；完成度为交付物覆盖率，不代表判据通过。判据以 `spec/judgments.md` 冻结 v1.8 为准（阈值零变更）。*")
     return "\n".join(s)
 
 
@@ -701,7 +701,7 @@ def build_html(figs, md_text, b2_rows, b2_empty, b2_invalid, b3, statuses):
            C["ok"], C["warn"], C["bad"]))
     parts.append("</style></head><body><div class='wrap'>")
     parts.append("<header><h1>研发进度对照报告</h1>")
-    parts.append("<div class='sub'>%s · 依据 <code>spec/judgments.md</code> 冻结 v1.7（阈值零变更） · "
+    parts.append("<div class='sub'>%s · 依据 <code>spec/judgments.md</code> 冻结 v1.8（阈值零变更） · "
                  "全部数字来自仓库数据 / 实跑 / git 状态 · "
                  "生成脚本 <code>Experiment/tools/gen_progress_report.py</code></div></header>" % STAMP)
 
@@ -812,7 +812,7 @@ def build_html(figs, md_text, b2_rows, b2_empty, b2_invalid, b3, statuses):
 
     parts.append("<footer>本报告只陈述可核对事实；完成度为交付物覆盖率，不代表判据通过。"
                  "复现：<code>py -3 Experiment/tools/gen_progress_report.py</code> · "
-                 "判据以 <code>spec/judgments.md</code> 冻结 v1.7 为准 · 生成于 %s</footer>" % date.today().isoformat())
+                 "判据以 <code>spec/judgments.md</code> 冻结 v1.8 为准 · 生成于 %s</footer>" % date.today().isoformat())
     parts.append("</div><script>%s</script></body></html>" % get_plotlyjs())
     return "".join(parts)
 
@@ -915,19 +915,20 @@ def apply_b1_review(md, html):
          "与 `neuromod` 同种子统计等价（均值/方差/迹曲线，不追 1e-4）、稀疏化 Gini/有效连接数、"
          "≥5（优先 10）seed 的 mean±SD 与种子级原始值、6 组跨基准消融表。",
          "2. **P0 · 按 §1 失败动作停在 T1/T2**（进行中）：四流契约、根因诊断、离线监督上界、"
-         "严格对称读出（约束 ①②③）、T1 两必要条件析因、附录 G.4 与 H.4 下一步"
-         "均已完成（§9.5 / §9.6，共 451 条记录）；可学习内部前向模型已用三个在线"
-         "可学习量替换结构先验、人工方向与饱和基线，但主实验 2×2 仍全 0%、"
-         "配对 0.00pp。瓶颈定位在自监督读出：Oja 主成分不是刺激判别方向，"
-         "且破缺前结果反馈不含刺激信息。下一步按冻结判据 §6.7 寻找「不依赖外部"
-         "标签且指向任务语义的自监督目标」。不得继续推进 B2 探针。"),
+         "严格对称读出（约束 ①②③）、T1 两必要条件析因、附录 G.4 / H.4 / I.4 下一步"
+         "均已完成（§9.5 / §9.6 / §9.7，共 635 条记录）；时序差分自预测用"
+         "连续试次 hidden 差的差分 Oja 补上「不依赖外部标签的自监督桥接目标」，"
+         "主实验 m1a1 g=0 30.00±42.16%、配对「完整 − 无迹」30.00pp 首次达标，"
+         "但仅 4/10 seed 有提升、均值未达 80%，瓶颈推进到 actor 方向校准可靠性。"
+         "下一步按冻结判据 §6.8：改进方向校准并回到 host 原结果反馈口径重做"
+         "10 seed 配对消融。不得继续推进 B2 探针。"),
         ("4. **P1 · 才允许启动 M2 探针**：",
          "4. **P1 · B1 未通过前禁止启动 M2 探针**（以下为解除阻塞后的方案，本轮不执行）："),
         ("因此 B1 目前只能写作「核心数值达标 / 完整验收阻塞」。",
          "但深夜多种子复核已判 **B1 不通过**，按 §1 失败动作应停止并转 T1/T2 研究（见 §9.1）。"),
         ("**该文档需标注为 v1.0 历史快照**，进度以本报告的证据链为准。",
          "**该文档与 §6 原表均视为历史快照**：桌面原件与 audit 副本已追加附录 D（v1.1）、E（v1.2）、"
-         "F（v1.3）、G（v1.4）、H（v1.5）、I（v1.6），进度以冻结判据 v1.7 §6.1–6.7 与本报告 §9.1/§9.2/§9.3/§9.4/§9.5/§9.6 为准。"),
+         "F（v1.3）、G（v1.4）、H（v1.5）、I（v1.6）、J（v1.7），进度以冻结判据 v1.8 §6.1–6.8 与本报告 §9.1/§9.2/§9.3/§9.4/§9.5/§9.6/§9.7 为准。"),
         ("M1 已实现多尺度迹并把 B1 核心判据拉到通过。",
          "M1 已实现多尺度迹并一度把 B1 核心判据判为通过（单 seed 口径；深夜多种子复核已推翻，见 §9.1）。"),
     ]
@@ -947,16 +948,17 @@ def apply_b1_review(md, html):
         ("<b>P0 补齐 B1 完整验收</b>：τe–N 三档 + 指数拟合、neuromod 同种子统计等价、"
          "稀疏化 Gini/有效连接、≥5（优先 10）seed 的 mean±SD 与种子级原始值、6 组消融表。",
          "<b>P0 按 §1 失败动作停在 T1/T2</b>：四流契约、根因诊断、离线监督上界、严格对称读出"
-         "（约束 ①②③）、T1 两必要条件析因、附录 G.4 与 H.4 下一步均已完成"
-         "（§9.5 / §9.6，共 451 条记录）；可学习内部前向模型已替换三个人工成分，"
-         "主实验 2×2 仍全 0%、配对 0.00pp。瓶颈在自监督读出：Oja 主成分不是刺激"
-         "判别方向。下一步按 §6.7 寻找「不依赖外部标签且指向任务语义的自监督目标」。"
-         "不得推进 B2。"),
+         "（约束 ①②③）、T1 两必要条件析因、附录 G.4 / H.4 / I.4 下一步均已完成"
+         "（§9.5 / §9.6 / §9.7，共 635 条记录）；时序差分自预测用差分 Oja 补上"
+         "「不依赖外部标签的自监督桥接目标」，主实验 m1a1 g=0 30.00±42.16%、"
+         "配对「完整 − 无迹」30.00pp 首次达标，但仅 4/10 seed 有提升、均值未达 80%，"
+         "瓶颈推进到 actor 方向校准可靠性。下一步按 §6.8 改进方向校准并回到 host "
+         "原结果反馈口径重做 10 seed 配对消融。不得推进 B2。"),
         ("<b>P1 才启动 M2 探针</b>：",
          "<b>P2 B1 未通过前禁止启动 M2 探针</b>（以下为解除阻塞后的方案，本轮不执行）："),
         ("与冻结判据 §6 已推翻前三项。该文档应标注为 v1.0 历史快照，进度以本报告证据链为准。</div>",
          "但 §6 原表的「B1 核心判据通过」又因单 seed 口径被 §6.1 复核推翻。"
-         "桌面原件与 audit 副本已追加附录 D/E/F/G/H/I；进度以冻结判据 v1.7 §6.1–6.7 与本报告第 9 节为准。</div>"),
+         "桌面原件与 audit 副本已追加附录 D/E/F/G/H/I/J；进度以冻结判据 v1.8 §6.1–6.8 与本报告第 9 节为准。</div>"),
     ]
     for old, new in md_pairs:
         assert old in md, "md 复核替换未命中：" + old[:36]
@@ -1147,6 +1149,44 @@ Oja 自监督读出 `v`（替代结构先验 `d_raw`）、actor 系数 `theta`�
 自身输出层响应或刺激重构），才可能让网络自发破对称；在此之前不谈重做
 B1 正式验收。**B1 仍不通过**，不进 B2、不写容器、不写 SNC。
 
+## 9.7 时序差分自预测自监督目标（附录 I.4 销项，B1 仍不通过）
+
+> 依据 `audit/b1_self_supervised_prediction_2026-11-13.md`、
+> `data/b1_ssp/ssp_summary.jsonl`（184 条 / 10 seed / 300 试次，可复算）；
+> 冻结判据已追加 `spec/judgments.md §6.8`（v1.8，**阈值零变更**）。
+> 新增 `brain/benchmark1_ssp.c` → `b1_ssp.dll`，只链接既有 `b1_core.o` /
+> `seed_bundle.o`；核心 `benchmark1_core.c` SHA1 仍为 `c8de144f…`。
+
+按附录 I.4 补上「可学习的桥接目标」：B1 协议固定 A/B 交替，用连续两试次
+hidden 状态之差 `Δ = ĥ(t) − ĥ(t−1)` 抵消共同成分、放大判别方向；对归一化
+差分做 Oja 得到读出 `v`，内部信号 `u = tanh(8·(v·ĥ(t)))`。无外部标签、
+无 left/right 结构先验、无人工方向；三个可学习量（差分 Oja `v` / actor
+`theta` / critic 基线 `b` 与优势 `A`）延续 §6.7，门控仍只改 `Synapse.e[]`。
+
+| 项 | 实测（全部 g=0） | 状态 |
+|---|---|---|
+| I.4 第 1 步 · 信号质量 | `u_gap = −0.734` vs §6.7 对照 −0.512（**1.43×**）；`u_mean = 0.094`；`\\|u\\|` 前/后 0.471/0.782（衰减比 2.004，增强不衰减） | 与刺激相关 ✓ / 幅度稳定 ✓ / 零均值**近似**达成（仍有直流偏置） |
+| 主实验 2×2（差分 Oja × 可学习优势） | m1a1 **30.00 ± 42.16%**、m0a1 20.00%、m0a0/m1a0 全 0%；联合效果 **+30.00pp** | 部分 seed 学出映射 |
+| **主归因判据** | 同 seed「完整 − 无迹」**30.00pp ≥ 30pp**；无奖励调制组归零 | **PASS —— 本项目首次出现可归因到学习的提升** |
+| 归因对照 | 冻结 actor 25% / 冻结 v 20% / 恒定、shuffle u 各 15% / 结构先验参照 15%（其 `u_gap` 更大却更差） | 非随机破缺 / 恒定答案 |
+| seed 异质性 | **4/10** seed 有提升，其中 **2/10** 达 100%；均值 30% 远低于 80% | 方向校准不稳定 |
+| 四流单变量覆盖 | structure 15% / weight 20% / noise 30% / trial_order 30% | 结论不依赖特定随机流 |
+
+**结论（比 §9.6 更进一层）**：附录 I.4 第 1 步（自监督目标产生与刺激相关、
+零均值、幅度稳定的内部信号）**近似达成**；第 2 步重做配对消融**首次达标**，
+证明「时序差分自监督目标」能桥接 hidden 表示与输出选择，让局部 R-STDP
+在严格对称基线上破缺并学出映射。但 `theta` 从随机初值只移动到 −0.396、
+critic 收敛后优势幅度偏小，**瓶颈已从「读出」推进到「actor 在破缺初期把
+随机方向校准到正确符号的可靠性」**；seed 间 0%–100% 的巨大差异也指向这一点。
+
+**诚实边界**：利用了「试次交替」这一 B1 协议时间结构，但**没有读取 stim 标签、
+没有使用外部教学信号、没有预设 left/right 语义**。`y` 的「平局视为失败」仍
+偏离 host 口径，前向模型为新增内部结构，前向模型常数固定未扫描，核心
+lr / psp / τ 与判据阈值一律零改动。30pp 达标**不构成 B1 通过**：均值 30%
+未达 80% 阈值、口径偏离 host、且新增内部结构；恒定 / shuffle / 结构先验
+参照组与各扫描组的零星提升均不计入验收。**B1 仍不通过**，不进 B2、
+不写容器、不写 SNC。
+
 """
     html_section = f"""<h2>9 · B1 多种子复核（本次新增，取代前文旧结论）</h2>
 <div class='callout bad'><b>B1 不通过。</b>10 个独立 seed 下 D=200 仅 <b>{passed}/{total}</b> 达标
@@ -1271,16 +1311,46 @@ g=0 <b>全部 0.00%</b>、平局率 100%，配对「完整 − 无迹」<b>0.00p
 网络自发破对称。依据 <code>audit/b1_learnable_forward_model_2026-11-13.md</code>
 与 <code>data/b1_fwd/fwd_summary.jsonl</code>；冻结判据 §6.7（v1.7，阈值零变更）。
 <b>B1 仍不通过</b>，不进 B2、不写容器、不写 SNC。</p>
+<h2>9.7 · 时序差分自预测自监督目标（附录 I.4 销项，B1 仍不通过）</h2>
+<div class='callout bad'><b>B1 仍不通过。</b>184 条记录 / 10 seed 上，差分自预测信号
+<code>u_gap = −0.734</code>（§6.7 对照 −0.512，<b>1.43×</b>）；
+主实验 m1a1 g=0 <b>30.00 ± 42.16%</b>，配对「完整 − 无迹」<b>30.00pp ≥30pp
+首次 PASS</b>，无奖励调制组归零。但仅 <b>4/10</b> seed 有提升、<b>2/10</b> 达 100%，
+均值 30% 远低于 80% 阈值，<b>不构成 B1 通过</b>。</div>
+{html_table(["项", "实测", "状态"], [
+    ["I.4 第 1 步 · 信号质量", "u_gap −0.734 vs 对照 −0.512（1.43×）；u_mean 0.094；|u| 前/后 0.471/0.782（增强不衰减）", badge(0.5)],
+    ["主实验 2×2（g=0）", "m1a1 30.00±42.16%、m0a1 20.00%、m0a0/m1a0 全 0%；联合 +30.00pp", badge(0.5)],
+    ["主归因判据", "同 seed 完整 − 无迹 = 30.00pp ≥30pp，无奖励调制归零", badge(1)],
+    ["归因对照", "冻结 actor 25% / 冻结 v 20% / 恒定·shuffle u 各 15% / 结构先验参照 15%", badge(1)],
+    ["seed 异质性", "4/10 有提升、2/10 达 100%，均值 30% 未达 80%", badge(0)],
+    ["四流单变量覆盖", "structure 15% / weight 20% / noise 30% / trial_order 30%", badge(1)],
+])}
+<p class='note'><b>实现：</b>B1 协议固定 A/B 交替，连续两试次 hidden 状态之差
+<code>Δ = ĥ(t) − ĥ(t−1)</code> 抵消共同成分、放大判别方向；差分 Oja 得 <code>v</code>，
+内部信号 <code>u = tanh(8·(v·ĥ(t)))</code>。无外部标签 / 无结构先验 / 无人工方向，
+三个可学习量（差分 Oja / actor / critic 优势）延续 §6.7，门控仍只改 <code>Synapse.e[]</code>。
+<b>结论：</b>附录 I.4 第 1 步近似达成、第 2 步首次达标，证明时序差分自监督目标能
+桥接 hidden 表示与输出选择；瓶颈从「读出」推进到 <b>actor 在破缺初期把随机方向
+校准到正确符号的可靠性</b>（theta 仅移动到 −0.396、seed 间 0%–100%）。
+<b>诚实边界：</b>利用试次交替但未读取 stim 标签、无外部教学信号；<code>y</code> 的
+平局口径偏离 host，前向模型为新增内部结构，核心 lr / psp / τ 与判据阈值零改动。
+30pp 达标<b>不构成 B1 通过</b>，诊断组与扫描组零星提升不计入验收。
+依据 <code>audit/b1_self_supervised_prediction_2026-11-13.md</code> 与
+<code>data/b1_ssp/ssp_summary.jsonl</code>；冻结判据 §6.8（v1.8，阈值零变更）。
+下一步按 §6.8 改进方向校准并回到 host 原结果反馈口径重做 10 seed 配对消融。
+<b>B1 仍不通过</b>，不进 B2、不写容器、不写 SNC。</p>
 """
     md = md.replace("## 10. 复现方式", md_section + "## 10. 复现方式")
     html = html.replace("<footer>", html_section + "<footer>")
     assert ("## 9.1 B1 多种子复核" in md and "## 9.2 根因诊断与离线监督上界" in md
             and "## 9.3 严格对称初始读出" in md and "## 9.4 T1 两必要条件析因" in md
             and "## 9.5 通路选择性第三因子" in md and "## 9.6 可学习内部前向模型" in md
+            and "## 9.7 时序差分自预测自监督目标" in md
             and "9 · B1 多种子复核" in html and "9.2 · 根因诊断与离线监督上界" in html
             and "9.3 · 严格对称初始读出" in html and "9.4 · T1 两必要条件析因" in html
             and "9.5 · 通路选择性第三因子" in html and "9.6 · 可学习内部前向模型" in html
-            and "冻结 v1.7" in md and "冻结 v1.7" in html)
+            and "9.7 · 时序差分自预测自监督目标" in html
+            and "冻结 v1.8" in md and "冻结 v1.8" in html)
     return md, html
 
 
