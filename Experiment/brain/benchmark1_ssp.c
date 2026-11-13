@@ -377,6 +377,61 @@ double b1s_last_delta(void) { return g_last_delta; }
 int    b1s_calib_mode(void) { return g_calib; }
 int    b1s_y_mode(void) { return g_y_mode; }
 
+/* ---- §6.11（v1.11）：sign(theta) 可辨识性审计的诊断钩子 ---- */
+/* 强制 theta 到给定值，用于把「门控方向」这一个比特单独拆出来做镜像对照。
+ * 只写 g_theta；不新增任何学习规则，也不改阈值。 */
+void b1s_set_theta(double t) { if (g_ready) g_theta = t; }
+
+/* A/B 通路的结构质量：sensory_A->hidden 与 sensory_B->hidden 的
+ * 连接数与权重和，以及 hidden->output_A / hidden->output_B 的权重和。
+ * 用于判定初始网络在结构上是否可区分 A/B 通路（对称即不可区分）。 */
+void b1s_struct_probe(double out[6]) {
+    int s;
+    double c[6];
+    c[0] = c[1] = c[2] = c[3] = c[4] = c[5] = 0.0;
+    if (!g_ready) {
+        if (out) for (s = 0; s < 6; s++) out[s] = -1.0;
+        return;
+    }
+    for (s = 0; s < g_net.synapse_count; s++) {
+        Synapse* syn = &g_net.synapses[s];
+        NeuronType pre = g_net.neurons[syn->pre_id].type;
+        NeuronType post = g_net.neurons[syn->post_id].type;
+        if (pre == NT_SENSORY_A && post == NT_HIDDEN) {
+            c[0] += 1.0; c[1] += syn->weight;
+        } else if (pre == NT_SENSORY_B && post == NT_HIDDEN) {
+            c[2] += 1.0; c[3] += syn->weight;
+        } else if (pre == NT_HIDDEN && post == NT_OUTPUT_A) {
+            c[4] += syn->weight;
+        } else if (pre == NT_HIDDEN && post == NT_OUTPUT_B) {
+            c[5] += syn->weight;
+        }
+    }
+    if (out) for (s = 0; s < 6; s++) out[s] = c[s];
+}
+
+/* 当前 ĥ 在 A/B 两条输出通路上的驱动差（归一化到 [-1,1]）。
+ * 只读网络自身状态与权重，不读 stim 标签。 */
+double b1s_drive_gap(void) {
+    int s, hbase;
+    double wa = 0.0, wb = 0.0, den;
+    if (!g_ready || !g_h) return 0.0;
+    hbase = g_net.sensory_a_count + g_net.sensory_b_count;
+    for (s = 0; s < g_net.synapse_count; s++) {
+        Synapse* syn = &g_net.synapses[s];
+        NeuronType post = g_net.neurons[syn->post_id].type;
+        int hi;
+        if (post != NT_OUTPUT_A && post != NT_OUTPUT_B) continue;
+        if (g_net.neurons[syn->pre_id].type != NT_HIDDEN) continue;
+        hi = syn->pre_id - hbase;
+        if (hi < 0 || hi >= g_hn) continue;
+        if (post == NT_OUTPUT_A) wa += syn->weight * g_h[hi];
+        else                     wb += syn->weight * g_h[hi];
+    }
+    den = fabs(wa) + fabs(wb);
+    return (den > 1e-12) ? (wa - wb) / den : 0.0;
+}
+
 double b1s_last_u(void) { return g_last_u; }
 double b1s_last_raw(void) { return g_last_raw; }
 double b1s_last_delta_norm(void) { return g_last_delta_norm; }

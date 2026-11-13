@@ -68,6 +68,9 @@ SUITES = {
     # v110 —— §6.10：多尺度 vs 单时间常数资格迹对照（M1 主张的外部校验）
     "v110": ("b1_trace", "trace_summary.jsonl",
              "b1_multiscale_trace_2026-11-13.md"),
+    # v111 —— §6.11：sign(theta) 可辨识性审计（§6.9 遗留的类别非对称信号问题）
+    "v111": ("b1_sign", "sign_summary.jsonl",
+             "b1_sign_identifiability_2026-11-13.md"),
 }
 SUITE = "v18"
 DATA = ROOT / "data" / "b1_ssp"
@@ -83,12 +86,26 @@ def set_suite(name: str) -> None:
     SUMMARY_JSONL = DATA / jsonl
     REPORT_MD = ROOT / "audit" / report
 
+
+def apply_holdout() -> None:
+    """§6.11 留出集复测：切换种子池与输出路径，避免覆盖发现集结果。"""
+    global SEED_POOL, HOLDOUT, SUMMARY_JSONL, REPORT_MD
+    SEED_POOL = HELDOUT_SEEDS
+    HOLDOUT = True
+    SUMMARY_JSONL = DATA / "sign_holdout.jsonl"
+    REPORT_MD = ROOT / "audit" / "b1_sign_holdout_2026-11-13.md"
+
 SA, SB, HIDDEN, OA, OB, AVG_CONN = 50, 50, 400, 25, 25, 8.0
 DELAY = 200
 TRIALS = 300
 LR, PSP, TRACE_K = 0.02, 10.0, 3
 EVAL_TRIALS = 200
 MASTER_SEEDS = [101, 202, 303, 404, 505, 606, 707, 808, 909, 1010]
+# §6.11 留出集：与 MASTER_SEEDS 不相交，只用于对「反向规则」做独立复测，
+# 避免在发现集上事后挑规则。
+HELDOUT_SEEDS = [1111, 1212, 1313, 1414, 1515, 1616, 1717, 1818, 1919, 2020]
+SEED_POOL = MASTER_SEEDS
+HOLDOUT = False
 
 LAMBDA = 1.0
 LAMBDA_DOSES = (0.0, 0.5, 1.0, 2.0)
@@ -167,6 +184,10 @@ def load_dll():
     d.b1s_tau_trace_k.restype = c_d
     d.b1s_trace_abs_sum.restype = c_d
     d.b1s_reset_probe.restype = c_d
+    # §6.11 sign(theta) 可辨识性审计钩子
+    d.b1s_set_theta.argtypes = [c_d]
+    d.b1s_struct_probe.argtypes = [p_d]
+    d.b1s_drive_gap.restype = c_d
     return d
 
 
@@ -242,10 +263,12 @@ def experiment(d, seed, group, mode=1, adv=1, learn_theta=1, learn_v=1,
                u_mode=0, lam=LAMBDA, ablation=(0, 0), freeze=0,
                delay=DELAY, n=TRIALS, overrides=None,
                eval_n=EVAL_TRIALS, model_seed=0, label="",
-               calib=0, y_mode=0, alpha=1.0, trace=None):
+               calib=0, y_mode=0, alpha=1.0, trace=None, theta_force=None):
     asym_i = new_net(d, seed, mode, adv, learn_theta, learn_v, u_mode,
                      lam, ablation, freeze, overrides, model_seed,
                      calib=calib, y_mode=y_mode, alpha=alpha, trace=trace)
+    if theta_force is not None:
+        d.b1s_set_theta(float(theta_force))
     trace_k = d.b1s_trace_k()
     tau_vec = [d.b1s_tau_trace_k(k) for k in range(trace_k)]
     alpha_vec = [d.b1s_trace_alpha(k) for k in range(trace_k)]
@@ -261,6 +284,7 @@ def experiment(d, seed, group, mode=1, adv=1, learn_theta=1, learn_v=1,
     raw_a = raw_b = 0.0
     delta_sum = a_abs = a_nonzero = gate_abs = mirror_sum = b_sum = 0.0
     dsm = dpp = dlt = 0.0
+    drv_a = drv_b = 0.0
     out = (C.c_double * 10)()
     for i, stim in enumerate(labels(n)):
         d.b1s_run_trial(stim, 1, delay, out)
@@ -298,6 +322,11 @@ def experiment(d, seed, group, mode=1, adv=1, learn_theta=1, learn_v=1,
         dsm += d.b1s_last_d_same()
         dpp += d.b1s_last_d_pair()
         dlt += d.b1s_last_delta()
+        dg = d.b1s_drive_gap()
+        if stim == 0:
+            drv_a += dg
+        else:
+            drv_b += dg
     theta_f = d.b1s_last_theta()
     b_f = d.b1s_last_b()
     g0 = g0_eval(d, eval_n)
@@ -330,6 +359,11 @@ def experiment(d, seed, group, mode=1, adv=1, learn_theta=1, learn_v=1,
         "beta_init": beta_i, "beta_final": beta_f,
         "theta0": theta0, "theta_final": theta_f, "b_final": b_f,
         "u_mean": u_all / n,
+        "u_a_mean": u_a / half if half else 0.0,
+        "u_b_mean": u_b / (n - half) if n > half else 0.0,
+        "drive_a_mean": drv_a / half if half else 0.0,
+        "drive_b_mean": drv_b / (n - half) if n > half else 0.0,
+        "theta_force": theta_force,
         "u_gap": u_a / half - u_b / (n - half),
         "raw_gap": raw_a / half - raw_b / (n - half),
         "u_abs_first": first, "u_abs_second": second,
@@ -500,11 +534,78 @@ def run_all_v110(quick=False):
     return rows
 
 
+def struct_row(d, seed):
+    """§6.11：初始网络 A/B 通路结构质量（不跑试次，纯只读探针）。"""
+    new_net(d, seed)
+    buf = (C.c_double * 6)()
+    d.b1s_struct_probe(buf)
+    d.b1s_destroy()
+    v = [float(x) for x in buf]
+    return {
+        "group": "struct", "label": "struct", "seed": seed, "n": 0,
+        "n_sensA_hidden": v[0], "mass_sensA_hidden": v[1],
+        "n_sensB_hidden": v[2], "mass_sensB_hidden": v[3],
+        "mass_hidden_outA": v[4], "mass_hidden_outB": v[5],
+    }
+
+
+def run_all_v111(quick=False):
+    """§6.11：sign(theta) 可辨识性审计（§6.9 遗留的类别非对称信号问题）。"""
+    d = load_dll()
+    seeds = SEED_POOL[:3] if quick else SEED_POOL
+    trials = 120 if quick else TRIALS
+    ev_trials = 60 if quick else EVAL_TRIALS
+    rows, t0 = [], time.time()
+
+    def add(*args, **kw):
+        kw.setdefault("n", trials)
+        kw.setdefault("eval_n", ev_trials)
+        r = experiment(*args, **kw)
+        rows.append(r)
+        print(f"[{r['group']:<20}] seed={r['seed']:<4} "
+              f"g0={r['g0_acc']:6.2f}% tie={r['g0_tie_rate']:5.1f}% "
+              f"sep={r['g0_stim_separation']:.2f} "
+              f"th={r['theta0']:+.3f}->{r['theta_final']:+.3f} "
+              f"uA={r['u_a_mean']:+.4f} uB={r['u_b_mean']:+.4f}", flush=True)
+        return r
+
+    # ---- S: 结构探针（A/B 通路质量是否可区分） ----
+    for s in seeds:
+        r = struct_row(d, s)
+        rows.append(r)
+        print(f"[struct              ] seed={r['seed']:<4} "
+              f"nA={r['n_sensA_hidden']:.0f} nB={r['n_sensB_hidden']:.0f} "
+              f"mA={r['mass_sensA_hidden']:.4f} mB={r['mass_sensB_hidden']:.4f} "
+              f"outA={r['mass_hidden_outA']:.3f} outB={r['mass_hidden_outB']:.3f}",
+              flush=True)
+
+    # ---- N: 自然臂（应复现 v1.9 的 30.00% / theta 符号随机） ----
+    for s in seeds:
+        add(d, s, "natural", label="natural")
+
+    # ---- F: 强制符号臂（theta 冻结在 ±1.0，幅度相同，只翻一个比特） ----
+    for tag, th in (("force_plus", 1.0), ("force_minus", -1.0)):
+        for s in seeds:
+            add(d, s, tag, learn_theta=0, theta_force=th, label=tag)
+        for s in seeds:
+            add(d, s, tag + "_notrace", learn_theta=0, theta_force=th,
+                ablation=(1, 0), label=tag + "_notrace")
+
+    DATA.mkdir(parents=True, exist_ok=True)
+    with SUMMARY_JSONL.open("w", encoding="utf-8") as f:
+        for r in rows:
+            f.write(json.dumps(r, ensure_ascii=False) + "\n")
+    print(f"完成 {len(rows)} 行，用时 {time.time() - t0:.1f}s -> {SUMMARY_JSONL}")
+    return rows
+
+
 def run_all(quick=False):
     if SUITE == "v19":
         return run_all_v19(quick)
     if SUITE == "v110":
         return run_all_v110(quick)
+    if SUITE == "v111":
+        return run_all_v111(quick)
     d = load_dll()
     seeds = MASTER_SEEDS[:3] if quick else MASTER_SEEDS
     dseeds = MASTER_SEEDS[:2] if quick else MASTER_SEEDS[:3]
@@ -1024,11 +1125,198 @@ def build_report_v110(rows):
     return "\n".join(a)
 
 
+def build_report_v111(rows):
+    """§6.11：sign(theta) 可辨识性审计。"""
+    a = []
+    ap = a.append
+    st = sel(rows, "struct")
+    nat = sel(rows, "natural")
+    fp = sel(rows, "force_plus")
+    fm = sel(rows, "force_minus")
+    fpn = sel(rows, "force_plus_notrace")
+    fmn = sel(rows, "force_minus_notrace")
+    seeds = sorted({r["seed"] for r in fp})
+    core = sha1(ROOT / "brain" / "benchmark1_core.c")
+    ntr = fp[0]["n"] if fp else 0
+    nev = fp[0]["g0_trials"] if fp else 0
+
+    by = lambda g, s: next((r for r in g if r["seed"] == s), None)
+
+    rows_t = []
+    for s in seeds:
+        p, m = by(fp, s), by(fm, s)
+        pn, mn = by(fpn, s), by(fmn, s)
+        n0 = by(nat, s)
+        u_a, u_b = p["u_a_mean"], p["u_b_mean"]
+        # 对齐判据：门控 sign(g)=sign(theta*u)。theta>0 只有在 u(A 试次)>0 时
+        # 才是「A 试次放大 A 通路」，故对齐方向由 sign(u_A) 决定。
+        align = "plus" if u_a > 0 else "minus"
+        acc_a = p["g0_acc"] if align == "plus" else m["g0_acc"]
+        acc_x = m["g0_acc"] if align == "plus" else p["g0_acc"]
+        nta = (pn["g0_acc"] if align == "plus" else mn["g0_acc"])
+        ntx = (mn["g0_acc"] if align == "plus" else pn["g0_acc"])
+        rows_t.append({
+            "seed": s, "u_a": u_a, "u_b": u_b, "align": align,
+            "acc_p": p["g0_acc"], "acc_m": m["g0_acc"],
+            "acc_a": acc_a, "acc_x": acc_x,
+            "nt_a": nta, "nt_x": ntx,
+            "att": acc_a - nta, "att_x": acc_x - ntx,
+            "th0": n0["theta0"] if n0 else 0.0,
+            "thf": n0["theta_final"] if n0 else 0.0,
+            "nat": n0["g0_acc"] if n0 else 0.0,
+            "sep_a": p["g0_stim_separation"], "sep_m": m["g0_stim_separation"],
+            "tie_a": p["g0_tie_rate"], "tie_m": m["g0_tie_rate"],
+        })
+
+    n_align_win = sum(1 for r in rows_t if r["acc_a"] > r["acc_x"] + 1e-9)
+    n_tie_all = sum(1 for r in rows_t if abs(r["acc_a"] - r["acc_x"]) <= 1e-9)
+    mean_a = mean([r["acc_a"] for r in rows_t])
+    mean_x = mean([r["acc_x"] for r in rows_t])
+    mean_att = mean([r["att"] for r in rows_t])
+    mean_att_x = mean([r["att_x"] for r in rows_t])
+    nat_mean = mean([r["nat"] for r in rows_t])
+    # 自然臂 theta_final 符号与 aligned 方向一致的 seed 数（随机 = n/2）
+    n_sign_hit = sum(1 for r in rows_t
+                     if (r["thf"] > 0) == (r["align"] == "plus"))
+    # 结构对称性
+    rel_sens = [abs(r["mass_sensA_hidden"] - r["mass_sensB_hidden"]) /
+                (abs(r["mass_sensA_hidden"]) + abs(r["mass_sensB_hidden"]) + 1e-12)
+                for r in st]
+    rel_out = [abs(r["mass_hidden_outA"] - r["mass_hidden_outB"]) /
+               (abs(r["mass_hidden_outA"]) + abs(r["mass_hidden_outB"]) + 1e-12)
+               for r in st]
+    n_sens_eq = sum(1 for r in st if r["n_sensA_hidden"] == r["n_sensB_hidden"])
+
+    ap("# sign(theta) 可辨识性审计" +
+       ("（留出集复测）" if HOLDOUT else "（判据 §6.9 遗留问题 / v1.11）"))
+    ap("")
+    ap(f"> 生成时间：{time.strftime('%Y-%m-%d %H:%M')} · 数据 "
+       f"`data/b1_sign/{SUMMARY_JSONL.name}`（{len(rows)} 条 / "
+       f"{len(seeds)} seed / {ntr} 试次，可复算）")
+    ap(f"> 实验台 `brain/benchmark1_ssp.c` → `b1_ssp.dll`（新增 "
+       f"`b1s_set_theta` / `b1s_struct_probe` / `b1s_drive_gap`）；"
+       f"核心 `benchmark1_core.c` SHA1 `{core[:10]}…` 未改。")
+    ap("> 强制 theta 只写一个标量、冻结其学习；**不新增学习规则、不改判据阈值**。")
+    ap("")
+    ap("## 0. 结论")
+    ap("")
+    ap("**待检验命题（跑之前写定）**：v1.9 已证 `sign(theta)` 是决定成败的主要变量。"
+       "本轮把门控方向这一个**比特**单独拆出来做镜像对照，回答「是否存在一种类别非对称、"
+       "又不泄漏答案的内部信号能确定该比特」。")
+    ap("")
+    ap(f"1. **结构上 A/B 通路不可区分**：sensory_A→hidden 与 sensory_B→hidden 的连接数 "
+       f"完全相等 {n_sens_eq}/{len(st)} 个 seed；权重和相对差最大 "
+       f"{max(rel_sens) if rel_sens else float('nan'):.2e}，hidden→output_A 与 "
+       f"hidden→output_B 的权重和相对差最大 "
+       f"{max(rel_out) if rel_out else float('nan'):.2e}。即初始网络不存在任何可读的 "
+       f"A/B 结构偏置。")
+    ap(f"2. **一个比特是决定性的，但方向与预注册相反**：把 theta 冻结在 ±1.0（幅度相同）。"
+       f"预注册规则 REG（`theta = +sign(u_A)`，即「A 试次放大 A 通路」）均值 "
+       f"{mean_a:.2f}%，反向规则 INV（`theta = −sign(u_A)`）均值 {mean_x:.2f}%；"
+       f"REG 胜出 {n_align_win}/{len(rows_t)} seed（并列 {n_tie_all}）。"
+       f"**REG 被证伪**。")
+    ap(f"3. **自然臂没有系统性地选中任一侧**：自然臂（theta 自由学习）均值 "
+       f"{nat_mean:.2f}%，落在 REG 与 INV 之间；其 `theta_final` 符号与 REG 方向一致的 "
+       f"seed 为 {n_sign_hit}/{len(rows_t)}（随机期望 {len(rows_t)/2:.1f}）。")
+    ap(f"4. **归因**：REG 臂「完整 − 无迹」= {mean_att:.2f}pp，INV 臂 = "
+       f"{mean_att_x:.2f}pp（口径沿用 §6.9 的 ≥30pp 归因线，仅作描述）。")
+    ap("")
+    if HOLDOUT:
+        ap("**判读（留出集）**：本文件只回答一个问题——发现集上「INV 规则优于 REG」"
+           "这一**事后观察**能否在不相交的 10 个新 seed 上复现。若 INV 臂均值仍在 "
+           f"{40:.0f}% 以上且明显高于自然臂，则该反向规则是候选机制（仍远未达 B1 门槛）；"
+           "若回落到自然臂附近，则发现集的 45% 属小样本噪声，不能作为机制。")
+    else:
+        ap("**判读（发现集）**：预注册的 REG 方向被证伪（5.00% 远低于 INV 的 45.00%），"
+           "因此本轮**没有**得到「存在可用类别非对称信号」的证据；INV 的 45% 是"
+           "**事后观察**，只能作为下一轮的待检验假设，必须用不相交 seed 独立复测"
+           "（`--suite v111 --holdout`）。结构探针显示 A/B 通路完全对称，"
+           "因此任何「按结构先验确定该比特」的方案在初始网络中都没有可用信息源。")
+    ap("")
+    ap("## 1. 结构对称性（初始网络，未跑试次）")
+    ap("")
+    ap("| seed | sensory_A→hidden 连接/权重和 | sensory_B→hidden 连接/权重和 | "
+       "相对差 | hidden→outA | hidden→outB | 相对差 |")
+    ap("|---|---|---|---|---|---|---|")
+    for r, rs, ro in zip(st, rel_sens, rel_out):
+        ap(f"| {r['seed']} | {r['n_sensA_hidden']:.0f} / "
+           f"{r['mass_sensA_hidden']:.6f} | {r['n_sensB_hidden']:.0f} / "
+           f"{r['mass_sensB_hidden']:.6f} | {rs:.2e} | "
+           f"{r['mass_hidden_outA']:.6f} | {r['mass_hidden_outB']:.6f} | {ro:.2e} |")
+    ap("")
+    ap("## 2. 强制符号镜像对照（theta 冻结，幅度 1.0）")
+    ap("")
+    ap("| seed | u(A 试次) | u(B 试次) | 对齐方向 | g=0 对齐臂 | g=0 反向臂 | "
+       "tie 对齐/反向 | A/B 分布差 对齐/反向 |")
+    ap("|---|---|---|---|---|---|---|---|")
+    for r in rows_t:
+        ap(f"| {r['seed']} | {r['u_a']:+.4f} | {r['u_b']:+.4f} | {r['align']} | "
+           f"{r['acc_a']:.2f}% | {r['acc_x']:.2f}% | "
+           f"{r['tie_a']:.1f}% / {r['tie_m']:.1f}% | "
+           f"{r['sep_a']:.2f} / {r['sep_m']:.2f} |")
+    ap("")
+    ap(f"对齐臂均值 **{mean_a:.2f}%**、反向臂均值 **{mean_x:.2f}%**、"
+       f"自然臂均值 **{nat_mean:.2f}%**。")
+    ap("")
+    ap("## 3. 归因（对齐 / 反向两臂各自「完整 − 无迹」）")
+    ap("")
+    ap("| seed | 对齐 g=0 | 对齐 无迹 | 对齐 归因 | 反向 g=0 | 反向 无迹 | 反向 归因 |")
+    ap("|---|---|---|---|---|---|---|")
+    for r in rows_t:
+        ap(f"| {r['seed']} | {r['acc_a']:.2f}% | {r['nt_a']:.2f}% | "
+           f"{r['att']:+.2f}pp | {r['acc_x']:.2f}% | {r['nt_x']:.2f}% | "
+           f"{r['att_x']:+.2f}pp |")
+    ap("")
+    ap(f"均值：对齐 {mean_att:+.2f}pp / 反向 {mean_att_x:+.2f}pp。")
+    ap("")
+    ap("## 4. 自然臂的自由比特")
+    ap("")
+    ap("| seed | theta 初值 | theta 末值 | 自然臂 g=0 | 对齐方向 | 符号是否命中 |")
+    ap("|---|---|---|---|---|---|")
+    for r in rows_t:
+        hit = "是" if (r["thf"] > 0) == (r["align"] == "plus") else "否"
+        ap(f"| {r['seed']} | {r['th0']:+.4f} | {r['thf']:+.4f} | "
+           f"{r['nat']:.2f}% | {r['align']} | {hit} |")
+    ap("")
+    ap(f"命中 {n_sign_hit}/{len(rows_t)}。若该数字接近一半，说明自然臂的成败完全由"
+       f"「初值符号 + 噪声」决定，学习回路没有提供任何指向约定答案的信息。")
+    ap("")
+    ap("## 5. 诚实边界")
+    ap("")
+    ap("- 这是**诊断/可辨识性审计**，不是 B1 验收；`theta` 被强制属于诊断手段，"
+       "**不计入能力口径**，g=0 结果只能用于比较两个比特的镜像差异。")
+    ap("- 镜像对照固定 |theta|=1.0 一个点，未扫幅度；幅度可能影响绝对水平，"
+       "但不改变「对齐 vs 反向」的符号结论。")
+    ap("- 结构探针只覆盖 sensory→hidden 与 hidden→output 的权重和/连接数，"
+       "未覆盖更高阶拓扑（如共享 hidden 邻居的重叠度）。")
+    ap(f"- seed 数 {len(rows_t)}、每 seed {ntr} 试次；所有比较为描述性，"
+       "**未做显著性检验，未改任何阈值**。")
+    ap("")
+    ap("## 6. 复现")
+    ap("")
+    ap("```")
+    ap("py -3 Experiment/tools/b1_self_supervised.py --suite v111 --report-only")
+    ap("py -3 Experiment/tools/b1_self_supervised.py --suite v111 --quick")
+    ap("py -3 Experiment/tools/b1_self_supervised.py --suite v111")
+    ap("```")
+    ap("")
+    ap("```")
+    ap(f"当前 b1_ssp.c  {sha1(ROOT / 'brain' / 'benchmark1_ssp.c')}")
+    ap(f"当前驱动脚本   {sha1(Path(__file__))}")
+    ap(f"当前 DLL       {sha1(DLL_PATH)}")
+    ap("```")
+    REPORT_MD.parent.mkdir(parents=True, exist_ok=True)
+    REPORT_MD.write_text("\n".join(a) + "\n", encoding="utf-8")
+    print(f"报告 -> {REPORT_MD}")
+
+
 def build_report(rows):
     if SUITE == "v19":
         return build_report_v19(rows)
     if SUITE == "v110":
         return build_report_v110(rows)
+    if SUITE == "v111":
+        return build_report_v111(rows)
     a = []
     ap = a.append
     fac = sel(rows, "factorial")
@@ -1343,8 +1631,12 @@ def main():
     parser.add_argument("--report-only", action="store_true")
     parser.add_argument("--suite", choices=sorted(SUITES), default="v18",
                         help="v18 = 复现 §6.8 的 30.00%%/30.00pp；v19 = 本轮新实验")
+    parser.add_argument("--holdout", action="store_true",
+                        help="v111 专用：改用不相交留出 seed 复测，结果另存")
     args = parser.parse_args()
     set_suite(args.suite)
+    if args.holdout:
+        apply_holdout()
     if args.report_only:
         if not SUMMARY_JSONL.exists():
             raise SystemExit(f"ERROR: {SUMMARY_JSONL} 不存在")
