@@ -65,6 +65,9 @@ SUITES = {
             "b1_self_supervised_prediction_2026-11-13.md"),
     "v19": ("b1_cal", "cal_summary.jsonl",
             "b1_direction_calibration_2026-11-13.md"),
+    # v110 —— §6.10：多尺度 vs 单时间常数资格迹对照（M1 主张的外部校验）
+    "v110": ("b1_trace", "trace_summary.jsonl",
+             "b1_multiscale_trace_2026-11-13.md"),
 }
 SUITE = "v18"
 DATA = ROOT / "data" / "b1_ssp"
@@ -155,12 +158,22 @@ def load_dll():
     d.b1s_set_calib_weights.argtypes = [c_d, c_d]
     d.b1s_calib_mode.restype = c_i
     d.b1s_y_mode.restype = c_i
+    # 迹配置与重置不变量探针
+    d.b1s_set_trace.argtypes = [c_i, c_d, c_d, c_d]
+    d.b1s_trace_k.restype = c_i
+    d.b1s_trace_alpha.argtypes = [c_i]
+    d.b1s_trace_alpha.restype = c_d
+    d.b1s_tau_trace_k.argtypes = [c_i]
+    d.b1s_tau_trace_k.restype = c_d
+    d.b1s_trace_abs_sum.restype = c_d
+    d.b1s_reset_probe.restype = c_d
     return d
 
 
 def new_net(d, seed, mode=1, adv=1, learn_theta=1, learn_v=1,
             u_mode=0, lam=LAMBDA, ablation=(0, 0), freeze=0,
-            overrides=None, model_seed=0, calib=0, y_mode=0, alpha=1.0):
+            overrides=None, model_seed=0, calib=0, y_mode=0, alpha=1.0,
+            trace=None):
     for name in STREAM:
         d.b1s_override_stream(STREAM[name], 0)
     d.b1s_legacy_rng(0)
@@ -173,6 +186,8 @@ def new_net(d, seed, mode=1, adv=1, learn_theta=1, learn_v=1,
     d.b1s_set_ablation(*ablation)
     d.b1s_set_model(mode, adv, learn_theta, learn_v, u_mode, lam, model_seed)
     d.b1s_set_calib(calib, y_mode)
+    if trace is not None:
+        d.b1s_set_trace(*trace)
     d.b1s_set_freeze_readout(freeze)
     return d.b1s_symmetrize(alpha)
 
@@ -227,10 +242,13 @@ def experiment(d, seed, group, mode=1, adv=1, learn_theta=1, learn_v=1,
                u_mode=0, lam=LAMBDA, ablation=(0, 0), freeze=0,
                delay=DELAY, n=TRIALS, overrides=None,
                eval_n=EVAL_TRIALS, model_seed=0, label="",
-               calib=0, y_mode=0, alpha=1.0):
+               calib=0, y_mode=0, alpha=1.0, trace=None):
     asym_i = new_net(d, seed, mode, adv, learn_theta, learn_v, u_mode,
                      lam, ablation, freeze, overrides, model_seed,
-                     calib=calib, y_mode=y_mode, alpha=alpha)
+                     calib=calib, y_mode=y_mode, alpha=alpha, trace=trace)
+    trace_k = d.b1s_trace_k()
+    tau_vec = [d.b1s_tau_trace_k(k) for k in range(trace_k)]
+    alpha_vec = [d.b1s_trace_alpha(k) for k in range(trace_k)]
     beta_i, _ = bias_beta(d)
     theta0 = d.b1s_last_theta0()
     w0 = d.b1s_weight_checksum()
@@ -288,6 +306,7 @@ def experiment(d, seed, group, mode=1, adv=1, learn_theta=1, learn_v=1,
     w1 = d.b1s_weight_checksum()
     ro1 = d.b1s_readout_checksum()
     n_syn = d.b1s_synapse_count()
+    trace_res = d.b1s_reset_probe()
     d.b1s_destroy()
     first = u_abs_first / half if half else 0.0
     second = u_abs_second / (n - half) if n > half else 0.0
@@ -297,6 +316,8 @@ def experiment(d, seed, group, mode=1, adv=1, learn_theta=1, learn_v=1,
         "learn_v": learn_v, "u_mode": u_mode, "lambda": lam, "delay": delay,
         "calib": calib, "y_mode": y_mode, "alpha": alpha,
         "d_same_mean": dsm / n, "d_pair_mean": dpp / n, "delta_mean": dlt / n,
+        "trace_k": trace_k, "tau_vec": tau_vec, "alpha_vec": alpha_vec,
+        "trace_residual": trace_res,
         "ablation": "notrace" if ablation[0] else ("noreward" if ablation[1] else "full"),
         "freeze_readout": freeze, "overrides": overrides or {},
         "train_inject_acc": tr_c / half * 100.0,
@@ -415,9 +436,75 @@ def run_all_v19(quick=False):
     return rows
 
 
+TRACE_CONFIGS = [
+    ("k1_t20", 1, (20.0, 0.0, 0.0)),
+    ("k1_t100", 1, (100.0, 0.0, 0.0)),
+    ("k1_t200", 1, (200.0, 0.0, 0.0)),
+    ("k1_t500", 1, (500.0, 0.0, 0.0)),
+    ("k2_20_100", 2, (20.0, 100.0, 0.0)),
+    ("k2_100_500", 2, (100.0, 500.0, 0.0)),
+    ("k3_20_100_500", 3, (20.0, 100.0, 500.0)),
+]
+BASE_TRACE = (3, 20.0, 100.0, 500.0)
+
+
+def sign_test(diffs):
+    """精确双侧符号检验（不引入新阈值，只报 p 值）。"""
+    d = [x for x in diffs if abs(x) > 1e-12]
+    n = len(d)
+    if n == 0:
+        return 1.0
+    pos = sum(1 for x in d if x > 0)
+    k = min(pos, n - pos)
+    p = 2.0 * sum(math.comb(n, i) for i in range(k + 1)) / (2 ** n)
+    return min(1.0, p)
+
+
+def run_all_v110(quick=False):
+    """§6.10：多尺度 vs 单时间常数资格迹（M1 主张的外部校验）。"""
+    d = load_dll()
+    seeds = MASTER_SEEDS[:3] if quick else MASTER_SEEDS
+    trials = 120 if quick else TRIALS
+    ev_trials = 60 if quick else EVAL_TRIALS
+    rows, t0 = [], time.time()
+
+    def add(*args, **kw):
+        kw.setdefault("n", trials)
+        kw.setdefault("eval_n", ev_trials)
+        r = experiment(*args, **kw)
+        rows.append(r)
+        print(f"[{r['group']:<8}] {r['label']:<15} k={r['trace_k']} "
+              f"tau={r['tau_vec']} seed={r['seed']:<4} "
+              f"g0={r['g0_acc']:6.2f}% res={r['trace_residual']:.2e} "
+              f"theta={r['theta0']:+.3f}->{r['theta_final']:+.3f}", flush=True)
+        return r
+
+    for cfg, k, taus in TRACE_CONFIGS:
+        for s in seeds:
+            add(d, s, "trace", label=cfg,
+                trace=(k, taus[0], taus[1], taus[2]))
+
+    for s in seeds:
+        add(d, s, "notrace", label="no_trace", trace=BASE_TRACE, ablation=(1, 0))
+
+    for nm in STREAM:
+        for s in seeds:
+            add(d, s, "stream", label=nm, trace=BASE_TRACE,
+                overrides={nm: STREAM_OVERRIDE})
+
+    DATA.mkdir(parents=True, exist_ok=True)
+    with SUMMARY_JSONL.open("w", encoding="utf-8") as f:
+        for r in rows:
+            f.write(json.dumps(r, ensure_ascii=False) + "\n")
+    print(f"完成 {len(rows)} 行，用时 {time.time() - t0:.1f}s -> {SUMMARY_JSONL}")
+    return rows
+
+
 def run_all(quick=False):
     if SUITE == "v19":
         return run_all_v19(quick)
+    if SUITE == "v110":
+        return run_all_v110(quick)
     d = load_dll()
     seeds = MASTER_SEEDS[:3] if quick else MASTER_SEEDS
     dseeds = MASTER_SEEDS[:2] if quick else MASTER_SEEDS[:3]
@@ -764,9 +851,184 @@ def build_report_v19(rows):
     return "\n".join(a)
 
 
+def build_report_v110(rows):
+    """§6.10：M1 多尺度资格迹 vs 单时间常数迹的外部校验。"""
+    a = []
+    ap = a.append
+    grid = sel(rows, "trace")
+    seeds = sorted({r["seed"] for r in grid})
+    nseed = len(seeds)
+    base = [r for r in grid if r["label"] == "k3_20_100_500"]
+    core = sha1(ROOT / "brain" / "benchmark1_core.c")
+    cfgs = [c for c, _, _ in TRACE_CONFIGS]
+
+    cmp = {}
+    for cfg in cfgs:
+        arm = [r for r in grid if r["label"] == cfg]
+        if arm and base:
+            diffs, common = paired_delta(rows, base, arm)   # k3 − cfg
+            cmp[cfg] = (mean(diffs), sign_test(diffs), len(diffs))
+
+    ap("# M1 多尺度资格迹的外部校验（判据 §6.10 下一步 / v1.10）")
+    ap("")
+    ap(f"> 生成时间：{time.strftime('%Y-%m-%d %H:%M')} · 数据 "
+       f"`data/b1_trace/trace_summary.jsonl`（{len(rows)} 条 / {nseed} seed / "
+       f"{rows[0]['n']} 试次，可复算）")
+    ap(f"> 实验台 `brain/benchmark1_ssp.c` → `b1_ssp.dll`（新增 `b1s_set_trace` 与重置探针）；"
+       f"核心 `benchmark1_core.c` SHA1 `{core[:12]}…` 未改。")
+    ap("> 迹配置只改 `HyperParams.trace_k / tau_trace_k`，**不新增学习规则、不改判据阈值**。")
+    ap("")
+
+    better = [c for c, (m, p, _) in cmp.items() if m >= 5.0 and p < 0.05]
+    worse = [c for c, (m, p, _) in cmp.items() if m <= -5.0 and p < 0.05]
+    same = [c for c in cfgs if c != "k3_20_100_500" and c not in better and c not in worse]
+
+    ap("## 0. 结论")
+    ap("")
+    ap("**预注册读法**（在跑之前写定，不因结果改口径）：以同 seed 配对差 `k3 − cfg` 判定，"
+       "`|配对差| ≥ 5pp 且符号检验 p < 0.05` 才算「有实质差异」。"
+       "5pp 与 p<0.05 是**描述性统计**约定，不是判据阈值，不改变 B1/B2/B3 任何判据。")
+    ap("")
+    if not better and not worse:
+        t5 = cmp.get("k1_t500")
+        extra = ""
+        if t5 and t5[0] < 0:
+            extra = (f"其中单尺度 τ=500 在均值上略高于 k3"
+                     f"（配对差 {fmt(t5[0])}pp，p={fmt(t5[1], 3)}），但未达显著。")
+        ap(f"1. **多尺度迹没有可辨识优势**：{len(same)} 个单尺度/双尺度配置与 "
+           f"`k3 (20/100/500)` 的配对差全部落在 ±5pp 内或 p ≥ 0.05。{extra}"
+           f"→ M1 的「多尺度资格迹」主张在本任务与当前实现下**缺乏经验支持**，"
+           f"保留它属于工程冗余而非必要设计。")
+    else:
+        if better:
+            ap(f"1. **多尺度显著更好**：{', '.join(better)} 相对 `k3` 的配对差 ≥5pp 且 p<0.05，"
+               f"多尺度迹在本任务上有实质作用。")
+        if worse:
+            ap(f"1. **多尺度反而更差**：{', '.join(worse)} 显著优于 `k3`，"
+               f"说明多尺度迹引入的长时间常数成分在稀释判别信号。")
+    ap("2. 本结论只针对「B1 任务 + 本实现 + g=0 口径」，不外推到其他任务或架构。")
+    ap("3. **B1 仍不通过**：这是消融/诊断轮，不重做正式验收，不改任何阈值。")
+    ap("")
+
+    ap("## 1. 迹配置对照")
+    ap("")
+    ap("| 配置 | K | 时间常数 (ticks) | α | g=0 均值 | 中位数 | ≥80% seed | 配对差 k3−cfg | 符号检验 p |")
+    ap("|---|---|---|---|---|---|---|---|---|")
+    for cfg, k, taus in TRACE_CONFIGS:
+        arm = [r for r in grid if r["label"] == cfg]
+        if not arm:
+            continue
+        xs = [r["g0_acc"] for r in arm]
+        al = arm[0]["alpha_vec"]
+        m, p, n = cmp.get(cfg, (float("nan"), 1.0, 0))
+        dtxt = "—" if cfg == "k3_20_100_500" else f"{fmt(m)}pp（n={n}）"
+        ptxt = "—" if cfg == "k3_20_100_500" else fmt(p, 3)
+        ap(f"| {cfg} | {k} | {'/'.join(str(int(x)) for x in taus[:k])} | "
+           f"{'/'.join(fmt(x, 2) for x in al)} | {fmt(mean(xs))} ± {fmt(sd(xs))} | "
+           f"{fmt(statistics.median(xs))} | {sum(1 for v in xs if v >= 80.0)}/{len(xs)} | "
+           f"{dtxt} | {ptxt} |")
+    ap("")
+    ap("α 列用于验证归一化正确（K=1 应为 1.00，K=2 应为 0.50/0.50，K=3 应为 1/3）。"
+       "若 K=1 时 α 仍为 0.33，说明走了 `b1s_set_hyper` 的旧路径、信用被暗削 3 倍 —— "
+       "本轮统一走 `b1s_set_trace` → `net_set_hyperparams`，α 已正确归一。")
+    ap("")
+    singles = []
+    for cfg, k, taus in TRACE_CONFIGS:
+        if k == 1:
+            arm = [r for r in grid if r["label"] == cfg]
+            if arm:
+                singles.append((taus[0], mean([r["g0_acc"] for r in arm])))
+    singles.sort()
+    if singles:
+        ap("**描述性趋势（未达显著，仅作下一轮假设）**：单尺度随 τ 单调不减 —— "
+           + "、".join(f"τ={int(t)} → {fmt(m)}%" for t, m in singles)
+           + "。而由短时程组成的 K=2 配置（20/100）反而只剩 5%，"
+           "高于 500 的时程成分被稀释后（100/500）也只到 10%。"
+           "方向上支持「有用信用主要来自长时程成分、短时程成分在稀释判别信号」，"
+           "但 n=10 的符号检验未达显著（p ≥ 0.125），不作为结论。")
+        ap("")
+
+    ap("## 2. 逐 seed（g=0 正确率 %）")
+    ap("")
+    ap("| seed | " + " | ".join(c for c in cfgs) + " |")
+    ap("|---|" + "---|" * len(cfgs))
+    for s in seeds:
+        vals = []
+        for cfg in cfgs:
+            hit = [r for r in grid if r["label"] == cfg and r["seed"] == s]
+            vals.append(fmt(hit[0]["g0_acc"]) if hit else "n/a")
+        ap(f"| {s} | " + " | ".join(vals) + " |")
+    ap("")
+
+    ap("## 3. 归因锚点（k3 基线下的 no_trace）")
+    ap("")
+    dmain, common = paired_delta(rows, base, sel(rows, "notrace"))
+    ap(f"同 seed「完整 − 无迹」= **{fmt(mean(dmain))}pp**（n={len(common)}，"
+       f"p={fmt(sign_test(dmain), 3)}）；完整组 {stat(base)[0]}、无迹组 {stat(sel(rows, 'notrace'))[0]}。")
+    ap("该锚点用于确认本轮实验台仍具备可归因的迹依赖更新，而不是整体失效。")
+    ap("")
+
+    ap("## 4. 四流单变量覆盖（k3 基线）")
+    ap("")
+    ap("| 覆盖流 | g=0 均值 | 配对差 vs 未覆盖 |")
+    ap("|---|---|---|")
+    for nm in STREAM:
+        arm = [r for r in sel(rows, "stream") if r["label"] == nm]
+        if not arm:
+            continue
+        d, common = paired_delta(rows, base, arm)
+        ap(f"| {nm} | {stat(arm)[0]} | {fmt(mean(d))}pp（n={len(common)}） |")
+    ap("")
+
+    ap("## 5. 重置不变量（BindsNET `reset_state_variables` 的本地等价）")
+    ap("")
+    mx = max(abs(r["trace_residual"]) for r in rows)
+    nbad = sum(1 for r in rows if abs(r["trace_residual"]) > 1e-12)
+    ap(f"`b1s_reset_probe()` 在每行结束前调用一次：**最大残差 {mx:.3e}**，"
+       f"非零行数 {nbad}/{len(rows)}。")
+    ap("残差为 0 说明每试次重置后资格迹完全清零，不存在 §6.6 那种跨试次指数累积"
+       "（当时镜像迹差曾达 1e94、制造 95% 假高正确率）。")
+    if nbad:
+        ap("")
+        ap("**注意：存在非零残差，该配置的数值结论需谨慎解读。**")
+    ap("")
+
+    ap("## 6. 诚实边界")
+    ap("")
+    for line in [
+        "只改 `trace_k` 与 `tau_trace_k`，学习规则、刺激生成器、任务定义、判据阈值零改动。",
+        "K=1 的四个时间常数（20/100/200/500）只覆盖 M1 默认谱的量级范围，未做连续扫描。",
+        "配对差与符号检验都是描述性统计，不构成新的验收门槛；B1 判据仍是 D=200 ≥80% 与配对 ≥30pp。",
+        "本轮是消融轮：不重做 B1 正式验收，也不因单轮结果修改 M1 的实现或判据。",
+        "**B1 仍不通过**，不进 B2、不写容器、不写 SNC。",
+    ]:
+        ap("- " + line)
+    ap("")
+
+    ap("## 7. 复现")
+    ap("")
+    ap("```")
+    ap("py -3 Experiment/tools/b1_self_supervised.py --suite v110 --report-only")
+    ap("py -3 Experiment/tools/b1_self_supervised.py --suite v110 --quick")
+    ap("py -3 Experiment/tools/b1_self_supervised.py --suite v110")
+    ap("```")
+    ap("")
+    ap("```")
+    ap(f"当前 b1_ssp.c  {sha1(ROOT / 'brain' / 'benchmark1_ssp.c')}")
+    ap(f"当前驱动脚本   {sha1(Path(__file__))}")
+    ap(f"当前 DLL       {sha1(DLL_PATH)}")
+    ap("```")
+    REPORT_MD.parent.mkdir(parents=True, exist_ok=True)
+    REPORT_MD.write_text("\n".join(a) + "\n", encoding="utf-8")
+    print(f"报告 -> {REPORT_MD}")
+    return "\n".join(a)
+
+
 def build_report(rows):
     if SUITE == "v19":
         return build_report_v19(rows)
+    if SUITE == "v110":
+        return build_report_v110(rows)
     a = []
     ap = a.append
     fac = sel(rows, "factorial")

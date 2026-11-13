@@ -276,6 +276,50 @@ void b1s_set_hyper(double learning_rate, double psp_factor, int trace_k) {
     if (trace_k >= 1 && trace_k <= 3) g_net.hp.trace_k = trace_k;
 }
 
+/* §6.10 下一步：多尺度 vs 单时间常数资格迹对照。
+ * 注意 b1s_set_hyper 只改 trace_k 而不重算 alpha 归一化，K<3 时信用会被暗削
+ * （核心 net_set_hyperparams 的注释已警示）。这里走完整 net_set_hyperparams，
+ * 把 alpha 置 -1 强制重新归一化为 1/K，保证与 K=3 同量级可比。 */
+void b1s_set_trace(int k, double t0, double t1, double t2) {
+    HyperParams hp;
+    if (!g_ready) return;
+    hp = g_net.hp;
+    if (k >= 1 && k <= 3) hp.trace_k = k;
+    if (t0 > 0.0) hp.tau_trace_k[0] = t0;
+    if (t1 > 0.0) hp.tau_trace_k[1] = t1;
+    if (t2 > 0.0) hp.tau_trace_k[2] = t2;
+    hp.trace_alpha[0] = hp.trace_alpha[1] = hp.trace_alpha[2] = -1.0;
+    net_set_hyperparams(&g_net, &hp);
+}
+
+int b1s_trace_k(void) { return g_ready ? g_net.hp.trace_k : 0; }
+double b1s_trace_alpha(int k) {
+    if (!g_ready || k < 0 || k > 2) return 0.0;
+    return g_net.hp.trace_alpha[k];
+}
+double b1s_tau_trace_k(int k) {
+    if (!g_ready || k < 0 || k > 2) return 0.0;
+    return g_net.hp.tau_trace_k[k];
+}
+
+/* 迹总幅度：用于检验跨试次是否残留。 */
+double b1s_trace_abs_sum(void) {
+    int i, k;
+    double m = 0.0;
+    if (!g_ready) return -1.0;
+    for (i = 0; i < g_net.synapse_count; i++)
+        for (k = 0; k < 3; k++) m += fabs(g_net.synapses[i].e[k]);
+    return m;
+}
+
+/* BindsNET reset_state_variables 不变量的本地版本：
+ * 试次重置后所有资格迹必须归零，否则跨试次状态泄漏（§6.6 的 1e94 就是这类）。 */
+double b1s_reset_probe(void) {
+    if (!g_ready) return -1.0;
+    reset_trial();
+    return b1s_trace_abs_sum();
+}
+
 void b1s_set_ablation(int no_trace, int no_reward) {
     g_no_trace = no_trace ? 1 : 0;
     g_no_reward = no_reward ? 1 : 0;
