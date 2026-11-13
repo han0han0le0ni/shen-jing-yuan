@@ -89,3 +89,7 @@ Experiment/data/b1_trace/
 
 # B1 sign(theta) 可辨识性审计原始数据（可复现：tools/b1_self_supervised.py --suite v111 [--holdout]）
 Experiment/data/b1_sign/
+
+# B1 探索噪声与延迟扫描原始数据（可复现：--suite v112 / v113 [--holdout]）
+Experiment/data/b1_noise/
+Experiment/data/b1_delay/

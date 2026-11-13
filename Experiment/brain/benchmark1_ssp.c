@@ -92,6 +92,11 @@ static int      g_u_mode = 0;        /* 0=学出的 u；1=恒定；2=shuffle；3
 static double   g_lambda = 1.0;
 static uint64_t g_model_state = 0;
 
+/* ---- §6.14：内在探索噪声（钩子实现见下方；此处需先于 b1s_create 可见） ---- */
+static int      g_explore_target = 0;   /* bit0=输出层，bit1=hidden */
+static double   g_explore_sigma = 0.0;  /* 膜电位噪声幅度（mV） */
+static uint64_t g_explore_state = 0;
+
 /* ---- §6.8 下一步（v1.9）：结果反馈口径 + actor 方向校准 ---- */
 /* y_mode: 0 = 平局视为失败 -1（v1.8 口径，偏离 host）
  *         1 = host 原口径：平局 reward 0.0（host/benchmark1_host.cpp:368-371） */
@@ -196,6 +201,7 @@ int b1s_create(int sensory_a, int sensory_b, int hidden,
         net_override_seed_stream(s, g_ov_on[s] ? g_ov_val[s] : base[s]);
     }
     g_model_state = ssp_splitmix64(&master) ^ 0x5A5A1234BEEF6789ULL;
+    g_explore_state = ssp_splitmix64(&master) ^ 0x1F2E3D4C5B6A7988ULL;
 
     memset(&g_net, 0, sizeof(g_net));
     if (net_init(&g_net, sensory_a, sensory_b, hidden,
@@ -430,6 +436,36 @@ double b1s_drive_gap(void) {
     }
     den = fabs(wa) + fabs(wb);
     return (den > 1e-12) ? (wa - wb) / den : 0.0;
+}
+
+/* ---- §6.14（v1.14）：内在探索噪声（R-STDP 的随机性必要条件） ---- */
+/* 文献条件(i)：R-STDP 是 REINFORCE 型估计，要求 p(z|w) 可微且非退化。
+ * 确定性网络的奖励方差为 0，梯度几乎处处为 0。此处从实验台层给膜电位叠加
+ * 噪声，核心源码零改动；噪声对 A/B 同分布，不携带任何类别信息。 */
+void b1s_set_explore(double sigma, int targets) {
+    g_explore_sigma = (sigma > 0.0) ? sigma : 0.0;
+    g_explore_target = (g_explore_sigma > 0.0) ? (targets & 3) : 0;
+}
+double b1s_explore_sigma(void) { return g_explore_sigma; }
+int    b1s_explore_target(void) { return g_explore_target; }
+
+static void inject_explore_noise(void) {
+    int i;
+    if (g_explore_target == 0) return;
+    for (i = 0; i < g_net.neuron_count; i++) {
+        NeuronType t = g_net.neurons[i].type;
+        double r;
+        if (t == NT_OUTPUT_A || t == NT_OUTPUT_B) {
+            if (!(g_explore_target & 1)) continue;
+        } else if (t == NT_HIDDEN) {
+            if (!(g_explore_target & 2)) continue;
+        } else {
+            continue;
+        }
+        r = ((double)(ssp_splitmix64(&g_explore_state) >> 11)) /
+            9007199254740992.0 * 2.0 - 1.0;
+        g_net.neurons[i].membrane_potential += g_explore_sigma * r;
+    }
 }
 
 double b1s_last_u(void) { return g_last_u; }
@@ -689,6 +725,7 @@ int b1s_run_trial(int stim, int learning_on, int delay, double out[10]) {
         } else {
             net_clear_stimulus(&g_net);
         }
+        if (learning_on) inject_explore_noise();
         net_tick(&g_net);
         ticks++;
         accum_hidden();

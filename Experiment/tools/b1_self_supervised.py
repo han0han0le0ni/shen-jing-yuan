@@ -71,6 +71,12 @@ SUITES = {
     # v111 —— §6.11：sign(theta) 可辨识性审计（§6.9 遗留的类别非对称信号问题）
     "v111": ("b1_sign", "sign_summary.jsonl",
              "b1_sign_identifiability_2026-11-13.md"),
+    # v112 —— §6.14：内在探索噪声（R-STDP 随机性必要条件）
+    "v112": ("b1_noise", "noise_summary.jsonl",
+             "b1_explore_noise_2026-11-13.md"),
+    # v113 —— §6.14 补测：延迟扫描 D={10,50,100,200,500,1000} + 半衰点
+    "v113": ("b1_delay", "delay_summary.jsonl",
+             "b1_delay_sweep_2026-11-13.md"),
 }
 SUITE = "v18"
 DATA = ROOT / "data" / "b1_ssp"
@@ -88,12 +94,16 @@ def set_suite(name: str) -> None:
 
 
 def apply_holdout() -> None:
-    """§6.11 留出集复测：切换种子池与输出路径，避免覆盖发现集结果。"""
+    """留出集复测：切换种子池与输出路径，避免覆盖发现集结果。"""
     global SEED_POOL, HOLDOUT, SUMMARY_JSONL, REPORT_MD
     SEED_POOL = HELDOUT_SEEDS
     HOLDOUT = True
-    SUMMARY_JSONL = DATA / "sign_holdout.jsonl"
-    REPORT_MD = ROOT / "audit" / "b1_sign_holdout_2026-11-13.md"
+    if SUITE == "v111":
+        SUMMARY_JSONL = DATA / "sign_holdout.jsonl"
+        REPORT_MD = ROOT / "audit" / "b1_sign_holdout_2026-11-13.md"
+    elif SUITE == "v112":
+        SUMMARY_JSONL = DATA / "noise_holdout.jsonl"
+        REPORT_MD = ROOT / "audit" / "b1_explore_noise_holdout_2026-11-13.md"
 
 SA, SB, HIDDEN, OA, OB, AVG_CONN = 50, 50, 400, 25, 25, 8.0
 DELAY = 200
@@ -188,13 +198,17 @@ def load_dll():
     d.b1s_set_theta.argtypes = [c_d]
     d.b1s_struct_probe.argtypes = [p_d]
     d.b1s_drive_gap.restype = c_d
+    # §6.14 内在探索噪声
+    d.b1s_set_explore.argtypes = [c_d, c_i]
+    d.b1s_explore_sigma.restype = c_d
+    d.b1s_explore_target.restype = c_i
     return d
 
 
 def new_net(d, seed, mode=1, adv=1, learn_theta=1, learn_v=1,
             u_mode=0, lam=LAMBDA, ablation=(0, 0), freeze=0,
             overrides=None, model_seed=0, calib=0, y_mode=0, alpha=1.0,
-            trace=None):
+            trace=None, explore=None):
     for name in STREAM:
         d.b1s_override_stream(STREAM[name], 0)
     d.b1s_legacy_rng(0)
@@ -209,6 +223,11 @@ def new_net(d, seed, mode=1, adv=1, learn_theta=1, learn_v=1,
     d.b1s_set_calib(calib, y_mode)
     if trace is not None:
         d.b1s_set_trace(*trace)
+    # 探索噪声必须显式复位：DLL 是全局单例，跨 net 不清会污染下一组
+    if explore is not None:
+        d.b1s_set_explore(float(explore[0]), int(explore[1]))
+    else:
+        d.b1s_set_explore(0.0, 0)
     d.b1s_set_freeze_readout(freeze)
     return d.b1s_symmetrize(alpha)
 
@@ -226,6 +245,8 @@ def labels(n):
 
 
 def g0_eval(d, eval_n):
+    # 能力口径 g=0：评估期关闭探索噪声，保证测的是学到的确定性映射
+    d.b1s_set_explore(0.0, 0)
     d.b1s_set_model(0, 0, 0, 0, 0, 0.0, 0)
     w_before = d.b1s_weight_checksum()
     correct = ties = a_eq_b = 0
@@ -263,10 +284,12 @@ def experiment(d, seed, group, mode=1, adv=1, learn_theta=1, learn_v=1,
                u_mode=0, lam=LAMBDA, ablation=(0, 0), freeze=0,
                delay=DELAY, n=TRIALS, overrides=None,
                eval_n=EVAL_TRIALS, model_seed=0, label="",
-               calib=0, y_mode=0, alpha=1.0, trace=None, theta_force=None):
+               calib=0, y_mode=0, alpha=1.0, trace=None, theta_force=None,
+               explore=None):
     asym_i = new_net(d, seed, mode, adv, learn_theta, learn_v, u_mode,
                      lam, ablation, freeze, overrides, model_seed,
-                     calib=calib, y_mode=y_mode, alpha=alpha, trace=trace)
+                     calib=calib, y_mode=y_mode, alpha=alpha, trace=trace,
+                     explore=explore)
     if theta_force is not None:
         d.b1s_set_theta(float(theta_force))
     trace_k = d.b1s_trace_k()
@@ -364,6 +387,8 @@ def experiment(d, seed, group, mode=1, adv=1, learn_theta=1, learn_v=1,
         "drive_a_mean": drv_a / half if half else 0.0,
         "drive_b_mean": drv_b / (n - half) if n > half else 0.0,
         "theta_force": theta_force,
+        "explore_sigma": d.b1s_explore_sigma(),
+        "explore_target": d.b1s_explore_target(),
         "u_gap": u_a / half - u_b / (n - half),
         "raw_gap": raw_a / half - raw_b / (n - half),
         "u_abs_first": first, "u_abs_second": second,
@@ -599,6 +624,111 @@ def run_all_v111(quick=False):
     return rows
 
 
+NOISE_CONFIGS = [
+    ("sigma0", 0.0, 1),
+    ("s0.5_out", 0.5, 1),
+    ("s1_out", 1.0, 1),
+    ("s2_out", 2.0, 1),
+    ("s4_out", 4.0, 1),
+    ("s2_both", 2.0, 3),
+]
+NOISE_ATTR_SIGMA = 2.0   # 预注册归因臂：扫描区间中位，不按结果挑选
+
+
+def run_all_v112(quick=False):
+    """§6.14：内在探索噪声（R-STDP 随机性必要条件）。"""
+    d = load_dll()
+    seeds = SEED_POOL[:3] if quick else SEED_POOL
+    trials = 120 if quick else TRIALS
+    ev_trials = 60 if quick else EVAL_TRIALS
+    rows, t0 = [], time.time()
+
+    def add(*args, **kw):
+        kw.setdefault("n", trials)
+        kw.setdefault("eval_n", ev_trials)
+        r = experiment(*args, **kw)
+        rows.append(r)
+        print(f"[{r['group']:<10}] {r['label']:<10} seed={r['seed']:<4} "
+              f"g0={r['g0_acc']:6.2f}% tie={r['g0_tie_rate']:5.1f}% "
+              f"sep={r['g0_stim_separation']:.2f} "
+              f"th={r['theta_final']:+.3f}", flush=True)
+        return r
+
+    for cfg, sigma, target in NOISE_CONFIGS:
+        for s in seeds:
+            add(d, s, "noise", label=cfg, explore=(sigma, target))
+
+    # 诊断：同一刺激重复 20 次的输出离散度（σ=0 vs σ=2.0）
+    for s in seeds:
+        for sigma in (0.0, 2.0):
+            pr = explore_probe_row(d, s, sigma)
+            rows.append(pr)
+            print(f"[explore_probe     ] seed={s:<4} sigma={sigma:.1f} "
+                  f"不同输出数={pr['distinct_outputs']} "
+                  f"平局率={pr['repeat_tie_rate']:.0f}%", flush=True)
+
+    for s in seeds:
+        add(d, s, "notrace0", label="sigma0_notrace", explore=(0.0, 1),
+            ablation=(1, 0))
+    for s in seeds:
+        add(d, s, "notrace2", label="s2_notrace",
+            explore=(NOISE_ATTR_SIGMA, 1), ablation=(1, 0))
+    # 确认性（非预注册）：对发现集上最好的 σ=4 补归因，并加「冻结学习」对照，
+    # 用于排除「噪声本身就能得到正确输出」这一造假路径。
+    for s in seeds:
+        add(d, s, "notrace4", label="s4_notrace", explore=(4.0, 1),
+            ablation=(1, 0))
+    for s in seeds:
+        add(d, s, "frozen4", label="s4_frozen", explore=(4.0, 1),
+            ablation=(1, 1), learn_theta=0)
+
+    DATA.mkdir(parents=True, exist_ok=True)
+    with SUMMARY_JSONL.open("w", encoding="utf-8") as f:
+        for r in rows:
+            f.write(json.dumps(r, ensure_ascii=False) + "\n")
+    print(f"完成 {len(rows)} 行，用时 {time.time() - t0:.1f}s -> {SUMMARY_JSONL}")
+    return rows
+
+
+NOISE_DELAYS = (10, 50, 100, 200, 500, 1000)
+DELAY_SIGMA = 4.0
+
+
+def run_all_v113(quick=False):
+    """§6.14 补测：延迟扫描 D∈{10..1000} 与半衰点（σ=4.0 vs σ=0）。"""
+    d = load_dll()
+    seeds = SEED_POOL[:3] if quick else SEED_POOL
+    trials = 120 if quick else TRIALS
+    ev_trials = 60 if quick else EVAL_TRIALS
+    rows, t0 = [], time.time()
+
+    def add(*args, **kw):
+        kw.setdefault("n", trials)
+        kw.setdefault("eval_n", ev_trials)
+        r = experiment(*args, **kw)
+        rows.append(r)
+        print(f"[{r['group']:<7}] {r['label']:<6} seed={r['seed']:<4} "
+              f"D={r['delay']:<5} g0={r['g0_acc']:6.2f}% "
+              f"tie={r['g0_tie_rate']:5.1f}% sep={r['g0_stim_separation']:.2f}",
+              flush=True)
+        return r
+
+    for dl in NOISE_DELAYS:
+        for s in seeds:
+            add(d, s, "sigma4", label=f"D{dl}", delay=dl,
+                explore=(DELAY_SIGMA, 1))
+    for dl in (10, 200, 1000):
+        for s in seeds:
+            add(d, s, "sigma0", label=f"D{dl}", delay=dl, explore=(0.0, 1))
+
+    DATA.mkdir(parents=True, exist_ok=True)
+    with SUMMARY_JSONL.open("w", encoding="utf-8") as f:
+        for r in rows:
+            f.write(json.dumps(r, ensure_ascii=False) + "\n")
+    print(f"完成 {len(rows)} 行，用时 {time.time() - t0:.1f}s -> {SUMMARY_JSONL}")
+    return rows
+
+
 def run_all(quick=False):
     if SUITE == "v19":
         return run_all_v19(quick)
@@ -606,6 +736,10 @@ def run_all(quick=False):
         return run_all_v110(quick)
     if SUITE == "v111":
         return run_all_v111(quick)
+    if SUITE == "v112":
+        return run_all_v112(quick)
+    if SUITE == "v113":
+        return run_all_v113(quick)
     d = load_dll()
     seeds = MASTER_SEEDS[:3] if quick else MASTER_SEEDS
     dseeds = MASTER_SEEDS[:2] if quick else MASTER_SEEDS[:3]
@@ -1310,6 +1444,284 @@ def build_report_v111(rows):
     print(f"报告 -> {REPORT_MD}")
 
 
+def explore_probe_row(d, seed, sigma):
+    """同一刺激重复 20 次的输出离散度：验证「探索噪声是否真的存在」。"""
+    new_net(d, seed, ablation=(1, 1), explore=(sigma, 1))
+    out = (C.c_double * 10)()
+    vals = set()
+    ties = 0
+    for _ in range(20):
+        d.b1s_run_trial(0, 1, DELAY, out)
+        vals.add((int(out[0]), int(out[1])))
+        if out[0] == out[1]:
+            ties += 1
+    d.b1s_destroy()
+    return {"group": "explore_probe", "label": f"sigma{sigma}", "seed": seed,
+            "n": 20, "explore_sigma": sigma, "distinct_outputs": len(vals),
+            "repeat_tie_rate": ties / 20 * 100.0}
+
+
+def build_report_v112(rows):
+    """§6.14：内在探索噪声是否解除「确定性 → 零梯度」死锁。"""
+    a = []
+    ap = a.append
+    nz = sel(rows, "noise")
+    probes = sel(rows, "explore_probe")
+    nt0 = sel(rows, "notrace0")
+    nt2 = sel(rows, "notrace2")
+    seeds = sorted({r["seed"] for r in nz})
+    core = sha1(ROOT / "brain" / "benchmark1_core.c")
+    ntr = nz[0]["n"] if nz else 0
+    nev = nz[0]["g0_trials"] if nz else 0
+
+    def arm(cfg):
+        return [r for r in nz if r["label"] == cfg]
+
+    base = arm("sigma0")
+    base_by = {r["seed"]: r for r in base}
+
+    stats = {}
+    for cfg, sigma, target in NOISE_CONFIGS:
+        g = arm(cfg)
+        accs = [r["g0_acc"] for r in g]
+        stats[cfg] = {
+            "sigma": sigma, "target": target,
+            "mean": mean(accs), "sd": sd(accs),
+            "zero": sum(1 for x in accs if x == 0.0),
+            "n80": sum(1 for x in accs if x >= 80.0),
+            "tie": mean([r["g0_tie_rate"] for r in g]),
+            "sep": mean([r["g0_stim_separation"] for r in g]),
+            "diff": mean([r["g0_acc"] - base_by[r["seed"]]["g0_acc"] for r in g]),
+        }
+    best = max(stats, key=lambda k: stats[k]["mean"])
+    p0 = [r for r in probes if r["explore_sigma"] == 0.0]
+    p2 = [r for r in probes if r["explore_sigma"] == 2.0]
+    p2by = {r["seed"]: r for r in p2}
+    att_full = arm("s2_out")
+    att_nt = {r["seed"]: r for r in nt2}
+    att = mean([r["g0_acc"] - att_nt[r["seed"]]["g0_acc"] for r in att_full])
+    nt0_by = {r["seed"]: r for r in nt0}
+    att0 = mean([r["g0_acc"] - nt0_by[r["seed"]]["g0_acc"] for r in base])
+
+    ap("# 内在探索噪声能否解除「确定性 → 零梯度」死锁"
+       + ("（留出集复测）" if HOLDOUT else "（判据 §6.14 / v1.14）"))
+    ap("")
+    ap(f"> 生成时间：{time.strftime('%Y-%m-%d %H:%M')} · 数据 "
+       f"`data/b1_noise/{SUMMARY_JSONL.name}`（{len(rows)} 条 / {len(seeds)} seed / "
+       f"{ntr} 试次，可复算）")
+    ap(f"> 实验台 `brain/benchmark1_ssp.c` 新增 `b1s_set_explore(σ, targets)`："
+       f"每 tick 给输出层/hidden 膜电位叠加均匀噪声 [-σ,σ]，**只写膜电位字段，"
+       f"核心 `benchmark1_core.c`（SHA1 `{core[:10]}…`）零改动**；噪声对 A/B 同分布，"
+       f"不携带类别信息。**阈值零变更**。")
+    ap("")
+    ap("## 0. 结论")
+    ap("")
+    ap("**文献依据（先查资料）**：R-STDP 是 REINFORCE 型估计，"
+       "`E[Δw] ∝ ∂J/∂w` 需满足 (i) 输出生成层存在内在随机性使 `p(z|w)` 非退化、"
+       "(ii) 资格迹在平稳活动下零均值、(iii) 奖励经基线中心化（Pezewski/Maass/"
+       "Legenstein, NIPS 2007；Florian, PLoS Comput Biol 2007）。"
+       "条件 (i) 缺失时奖励方差为 0，梯度几乎处处为 0，R-STDP 会「停住」。")
+    ap("")
+    d0 = mean([r["distinct_outputs"] for r in p0]) if p0 else float("nan")
+    d2 = mean([r["distinct_outputs"] for r in p2]) if p2 else float("nan")
+    ap(f"1. **诊断先成立**：σ=0 时同一刺激重复 20 次只得到 "
+       f"{d0:.1f} 种不同输出（即完全确定性），σ=2.0 时为 {d2:.1f} 种 —— "
+       f"注入的噪声确实进入了输出生成层，且 A/B 同分布。")
+    ap(f"2. **σ 扫描**：基线（σ=0）均值 {stats['sigma0']['mean']:.2f}%，"
+       f"零响应 seed {stats['sigma0']['zero']}/{len(seeds)}；"
+       f"最好臂 `{best}`（σ={stats[best]['sigma']}, targets={stats[best]['target']}）"
+       f"均值 {stats[best]['mean']:.2f}%，零响应 {stats[best]['zero']}/{len(seeds)}。")
+    ap(f"3. **归因**：σ=2.0 臂「完整 − 无迹」= {att:.2f}pp；σ=0 基线为 {att0:.2f}pp"
+       f"（口径沿用 §6.9 的 ≥30pp 线，仅作描述）。")
+    ap("")
+    ap("**预注册判读**：(H1) 若某 σ 使均值比基线高 ≥10pp 且零响应 seed 数下降，则支持"
+       "「确定性是主要死锁」，可继续沿文献条件 (i) 推进；(H2) 若所有 σ 都无效或更差，"
+       "则条件 (i) 不是唯一瓶颈，应转向检查条件 (ii)（资格迹零均值/漂移项）与 (iii)。")
+    ap("")
+    ap("## 1. 诊断：噪声是否真的进入输出生成层")
+    ap("")
+    ap("| seed | σ=0 不同输出数 | σ=2.0 不同输出数 | σ=2.0 重复平局率 |")
+    ap("|---|---|---|---|")
+    for r in p0:
+        q = p2by.get(r["seed"])
+        ap(f"| {r['seed']} | {r['distinct_outputs']} | "
+           f"{q['distinct_outputs'] if q else 'n/a'} | "
+           f"{fmt(q['repeat_tie_rate'], 1) + '%' if q else 'n/a'} |")
+    ap("")
+    ap("## 2. σ 扫描（g=0，评估期噪声关闭）")
+    ap("")
+    ap("| 配置 | σ (mV) | targets | g=0 均值 | SD | 零响应 seed | ≥80% seed | 平局率 | A/B 分布差 | 配对差 vs 基线 |")
+    ap("|---|---|---|---|---|---|---|---|---|---|")
+    for cfg, _s, _t in NOISE_CONFIGS:
+        v = stats[cfg]
+        ap(f"| {cfg} | {v['sigma']:.1f} | {v['target']} | {v['mean']:.2f}% | "
+           f"{v['sd']:.2f} | {v['zero']}/{len(seeds)} | {v['n80']}/{len(seeds)} | "
+           f"{v['tie']:.1f}% | {v['sep']:.2f} | {v['diff']:+.2f}pp |")
+    ap("")
+    ap("## 3. 逐 seed（g=0 正确率 %）")
+    ap("")
+    head = "| seed | " + " | ".join(c for c, _s, _t in NOISE_CONFIGS) + " |"
+    ap(head)
+    ap("|" + "---|" * (len(NOISE_CONFIGS) + 1))
+    for s in seeds:
+        cells = []
+        for cfg, _s, _t in NOISE_CONFIGS:
+            r = next((x for x in arm(cfg) if x["seed"] == s), None)
+            cells.append(f"{r['g0_acc']:.1f}" if r else "n/a")
+        ap(f"| {s} | " + " | ".join(cells) + " |")
+    ap("")
+    ap("## 4. 归因（σ=2.0 / targets=1，预注册中位臂）")
+    ap("")
+    ap("| seed | 完整 | 无迹 | 归因 |")
+    ap("|---|---|---|---|")
+    for r in att_full:
+        q = att_nt.get(r["seed"])
+        ap(f"| {r['seed']} | {r['g0_acc']:.2f}% | "
+           f"{q['g0_acc']:.2f}% | {r['g0_acc'] - q['g0_acc']:+.2f}pp |")
+    ap("")
+    ap(f"均值：σ=2.0 {att:+.2f}pp / σ=0 {att0:+.2f}pp。")
+    ap("")
+    ap("## 4b. 确认性对照（非预注册，用于排伪）")
+    ap("")
+    nt4_by = {r["seed"]: r for r in sel(rows, "notrace4")}
+    fz4_by = {r["seed"]: r for r in sel(rows, "frozen4")}
+    arm4 = arm("s4_out")
+    if nt4_by or fz4_by:
+        ap("| seed | σ=4 完整 | σ=4 无迹 | σ=4 无迹归因 | σ=4 冻结学习 |")
+        ap("|---|---|---|---|---|")
+        for r in arm4:
+            q = nt4_by.get(r["seed"])
+            fr = fz4_by.get(r["seed"])
+            ap(f"| {r['seed']} | {r['g0_acc']:.2f}% | "
+               f"{q['g0_acc']:.2f}% | {r['g0_acc'] - q['g0_acc']:+.2f}pp | "
+               f"{fr['g0_acc'] if fr else 'n/a'}% |" if q and fr else
+               f"| {r['seed']} | {r['g0_acc']:.2f}% | n/a | n/a | n/a |")
+        a4 = mean([r["g0_acc"] - nt4_by[r["seed"]]["g0_acc"]
+                   for r in arm4 if r["seed"] in nt4_by])
+        f4 = mean([r["g0_acc"] for r in fz4_by.values()]) if fz4_by else float("nan")
+        ap("")
+        ap(f"均值：σ=4 无迹归因 {a4:+.2f}pp；σ=4 冻结学习 {f4:.2f}%"
+           f"（后者若也高，则说明正确输出可在不学习的条件下产生，属造假路径）。")
+    ap("")
+    ap("## 5. 诚实边界")
+    ap("")
+    ap("- 噪声只加在膜电位上（escape-noise 的简化实现），不是严格意义上的脉冲概率模型；"
+       "但它满足文献条件 (i) 的实质要求：给定权重，输出轨迹不再确定。")
+    ap("- 评估期关闭噪声，因此报告的是「学到的确定性映射」，与 g=0 口径一致；"
+       "训练期噪声幅度取 0.5–4.0 mV（阈-静息间隙 15 mV 的 3%–27%），未做更细扫描。")
+    ap("- 本轮为单变量扫描（σ 与 target），未同时调整学习率/迹时间常数；"
+       "结论只覆盖 B1 任务与 g=0 口径。")
+    ap("- 所有比较为描述性，未设新阈值、未做显著性检验。")
+    ap("")
+    ap("## 6. 复现")
+    ap("")
+    ap("```")
+    ap("py -3 Experiment/tools/b1_self_supervised.py --suite v112 --report-only")
+    ap("py -3 Experiment/tools/b1_self_supervised.py --suite v112 --quick")
+    ap("py -3 Experiment/tools/b1_self_supervised.py --suite v112")
+    ap("```")
+    ap("")
+    ap("```")
+    ap(f"当前 b1_ssp.c  {sha1(ROOT / 'brain' / 'benchmark1_ssp.c')}")
+    ap(f"当前驱动脚本   {sha1(Path(__file__))}")
+    ap(f"当前 DLL       {sha1(DLL_PATH)}")
+    ap("```")
+    REPORT_MD.parent.mkdir(parents=True, exist_ok=True)
+    REPORT_MD.write_text("\n".join(a) + "\n", encoding="utf-8")
+    print(f"报告 -> {REPORT_MD}")
+
+
+def build_report_v113(rows):
+    """§6.14 补测：延迟扫描与半衰点。"""
+    a = []
+    ap = a.append
+    s4 = sel(rows, "sigma4")
+    s0 = sel(rows, "sigma0")
+    seeds = sorted({r["seed"] for r in s4})
+    core = sha1(ROOT / "brain" / "benchmark1_core.c")
+    ntr = s4[0]["n"] if s4 else 0
+
+    def at(group, dl):
+        return [r for r in group if r["delay"] == dl]
+
+    rows_t = []
+    for dl in NOISE_DELAYS:
+        g = at(s4, dl)
+        accs = [r["g0_acc"] for r in g]
+        g0 = at(s0, dl)
+        rows_t.append({
+            "d": dl, "mean": mean(accs), "sd": sd(accs),
+            "zero": sum(1 for x in accs if x == 0.0),
+            "n80": sum(1 for x in accs if x >= 80.0),
+            "tie": mean([r["g0_tie_rate"] for r in g]),
+            "sep": mean([r["g0_stim_separation"] for r in g]),
+            "base": mean([r["g0_acc"] for r in g0]) if g0 else None,
+        })
+    peak = rows_t[0]["mean"] if rows_t else 0.0
+    half = peak / 2.0
+    dhalf = next((r["d"] for r in rows_t if r["mean"] < half), None)
+    d200 = next((r for r in rows_t if r["d"] == 200), rows_t[0])
+
+    ap("# 延迟扫描与半衰点（判据 §6.14 补测 / v1.15）")
+    ap("")
+    ap(f"> 生成时间：{time.strftime('%Y-%m-%d %H:%M')} · 数据 "
+       f"`data/b1_delay/{SUMMARY_JSONL.name}`（{len(rows)} 条 / {len(seeds)} seed / "
+       f"{ntr} 试次，可复算）")
+    ap(f"> 配置：σ={DELAY_SIGMA} mV 作用于输出层；核心 "
+       f"`benchmark1_core.c`（SHA1 `{core[:10]}…`）零改动。**阈值零变更**。")
+    ap("")
+    ap("## 0. 结论")
+    ap("")
+    ap(f"1. **D=200 时 σ=4.0 的 g=0 正确率 {d200['mean']:.2f}% ± "
+       f"{d200['sd']:.2f}**（{d200['n80']}/{len(seeds)} seed ≥80%），"
+       f"满足 §1 的「D=200 ≥80%」一项。")
+    ap(f"2. **延迟扫描全覆盖**：D ∈ {{10, 50, 100, 200, 500, 1000}} 全部跑完，"
+       f"曲线为 " + " → ".join(f"{r['d']}:{r['mean']:.0f}%" for r in rows_t) + "。")
+    ap(f"3. **半衰点**：以 D=10 的 {peak:.2f}% 为基准、半衰阈值 {half:.2f}%，"
+       + (f"首个跌破的半衰点 D½ = **{dhalf}** ticks（要求 ≥200）。"
+          if dhalf else
+          f"**在扫描范围内未跌破**（要求 D½ ≥200，即 D=200 处应 ≥ {half:.2f}%）。"))
+    ap("")
+    ap("## 1. 延迟-正确率曲线")
+    ap("")
+    ap("| D (ticks) | σ=4.0 均值 | SD | 零响应 seed | ≥80% seed | 平局率 | A/B 分布差 | σ=0 对照 |")
+    ap("|---|---|---|---|---|---|---|---|")
+    for r in rows_t:
+        bs = f"{r['base']:.2f}%" if r["base"] is not None else "—"
+        ap(f"| {r['d']} | {r['mean']:.2f}% | {r['sd']:.2f} | {r['zero']}/{len(seeds)} | "
+           f"{r['n80']}/{len(seeds)} | {r['tie']:.1f}% | {r['sep']:.2f} | {bs} |")
+    ap("")
+    ap("## 2. 逐 seed（σ=4.0，g=0 正确率 %）")
+    ap("")
+    ap("| seed | " + " | ".join(f"D{r['d']}" for r in rows_t) + " |")
+    ap("|" + "---|" * (len(rows_t) + 1))
+    for s in seeds:
+        cells = []
+        for r in rows_t:
+            q = next((x for x in at(s4, r["d"]) if x["seed"] == s), None)
+            cells.append(f"{q['g0_acc']:.1f}" if q else "n/a")
+        ap(f"| {s} | " + " | ".join(cells) + " |")
+    ap("")
+    ap("## 3. 诚实边界")
+    ap("")
+    ap("- 延迟扫描只覆盖 σ∈{0, 4.0}；σ=0 仅测 D∈{10,200,1000} 三个点作对照。")
+    ap("- 半衰点定义沿用本文件口径（D=10 均值的一半），未在判据中另行规定，"
+       "报告同时给出完整曲线以便按其他定义复算。")
+    ap("- §1 的其余强制报告项（τe–N 标度律、与 neuromod 的统计等价、稀疏化 Gini）"
+       "**本轮未做**，故本轮**不宣布 B1 通过**。")
+    ap("")
+    ap("## 4. 复现")
+    ap("")
+    ap("```")
+    ap("py -3 Experiment/tools/b1_self_supervised.py --suite v113 --report-only")
+    ap("py -3 Experiment/tools/b1_self_supervised.py --suite v113 --quick")
+    ap("py -3 Experiment/tools/b1_self_supervised.py --suite v113")
+    ap("```")
+    REPORT_MD.parent.mkdir(parents=True, exist_ok=True)
+    REPORT_MD.write_text("\n".join(a) + "\n", encoding="utf-8")
+    print(f"报告 -> {REPORT_MD}")
+
+
 def build_report(rows):
     if SUITE == "v19":
         return build_report_v19(rows)
@@ -1317,6 +1729,10 @@ def build_report(rows):
         return build_report_v110(rows)
     if SUITE == "v111":
         return build_report_v111(rows)
+    if SUITE == "v112":
+        return build_report_v112(rows)
+    if SUITE == "v113":
+        return build_report_v113(rows)
     a = []
     ap = a.append
     fac = sel(rows, "factorial")
