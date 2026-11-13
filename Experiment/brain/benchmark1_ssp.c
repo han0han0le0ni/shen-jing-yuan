@@ -326,6 +326,59 @@ double b1s_reset_probe(void) {
     return b1s_trace_abs_sum();
 }
 
+/* ---- §1 强制报告「稀疏化」：权重分布只读诊断（v1.16） ---- */
+int b1s_neuron_count(void) { return g_ready ? g_net.neuron_count : 0; }
+
+static int cmp_double_asc(const void* a, const void* b) {
+    double x = *(const double*)a, y = *(const double*)b;
+    if (x < y) return -1;
+    if (x > y) return 1;
+    return 0;
+}
+
+/* scope: 0 = 全部突触；1 = readout 边（hidden→output，即 g_idx 快照）
+ * out: [0]=Gini(|w|)  [1]=有效连接数 (Σ|w|)²/Σw²  [2]=active 计数(|w|>0.5·mean)
+ *      [3]=mean|w|    [4]=突触数 n             [5]=饱和计数(w>=WEIGHT_MAX−1e-9)
+ *      [6]=p90|w|
+ * 只读权重字段，不写任何状态、不推进 tick；Gini 用排序后的标准式
+ *   G = 2·Σ i·x_i /(n·Σx_i) − (n+1)/n  （i 从 1 起，x 升序）。 */
+void b1s_weight_stats(int scope, double out[7]) {
+    double* x;
+    int n, k, active = 0, sat = 0;
+    double sum = 0.0, sumsq = 0.0, gini = 0.0, mu;
+    if (out) for (k = 0; k < 7; k++) out[k] = 0.0;
+    if (!g_ready || !out) return;
+    n = (scope == 1) ? g_m : g_net.synapse_count;
+    if (n <= 0) return;
+    x = (double*)malloc((size_t)n * sizeof(double));
+    if (!x) return;
+    for (k = 0; k < n; k++) {
+        int idx = (scope == 1) ? g_idx[k] : k;
+        x[k] = fabs(g_net.synapses[idx].weight);
+        sum += x[k];
+        sumsq += x[k] * x[k];
+    }
+    qsort(x, (size_t)n, sizeof(double), cmp_double_asc);
+    if (sum > 1e-12) {
+        double acc = 0.0;
+        for (k = 0; k < n; k++) acc += (double)(k + 1) * x[k];
+        gini = 2.0 * acc / ((double)n * sum) - ((double)n + 1.0) / (double)n;
+    }
+    mu = sum / (double)n;
+    for (k = 0; k < n; k++) {
+        if (x[k] > 0.5 * mu) active++;
+        if (x[k] >= WEIGHT_MAX - 1e-9) sat++;
+    }
+    out[0] = gini;
+    out[1] = (sumsq > 1e-12) ? (sum * sum / sumsq) : 0.0;
+    out[2] = (double)active;
+    out[3] = mu;
+    out[4] = (double)n;
+    out[5] = (double)sat;
+    out[6] = x[(int)(0.9 * (double)(n - 1))];
+    free(x);
+}
+
 void b1s_set_ablation(int no_trace, int no_reward) {
     g_no_trace = no_trace ? 1 : 0;
     g_no_reward = no_reward ? 1 : 0;

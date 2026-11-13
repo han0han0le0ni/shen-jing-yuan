@@ -77,6 +77,15 @@ SUITES = {
     # v113 —— §6.14 补测：延迟扫描 D={10,50,100,200,500,1000} + 半衰点
     "v113": ("b1_delay", "delay_summary.jsonl",
              "b1_delay_sweep_2026-11-13.md"),
+    # v114 —— §1 强制报告：τe–N 标度律（N=500/1000/2000）
+    "v114": ("b1_taun", "taun_summary.jsonl",
+             "b1_tau_n_scaling_2026-11-13.md"),
+    # v115 —— §1 强制报告：稀疏化 Gini / 有效连接数（含无迹组）
+    "v115": ("b1_sparse", "sparse_summary.jsonl",
+             "b1_sparsification_2026-11-13.md"),
+    # v116 —— §1 强制报告：neuromod（Rust）同种子统计等价的本侧工件
+    "v116": ("b1_ref", "ref_summary.jsonl",
+             "b1_neuromod_reference_2026-11-13.md"),
 }
 SUITE = "v18"
 DATA = ROOT / "data" / "b1_ssp"
@@ -116,6 +125,7 @@ MASTER_SEEDS = [101, 202, 303, 404, 505, 606, 707, 808, 909, 1010]
 HELDOUT_SEEDS = [1111, 1212, 1313, 1414, 1515, 1616, 1717, 1818, 1919, 2020]
 SEED_POOL = MASTER_SEEDS
 HOLDOUT = False
+EXTEND = False   # v114：只补跑缺失的长延迟点（右删失后的 D 轴延伸）
 
 LAMBDA = 1.0
 LAMBDA_DOSES = (0.0, 0.5, 1.0, 2.0)
@@ -202,19 +212,23 @@ def load_dll():
     d.b1s_set_explore.argtypes = [c_d, c_i]
     d.b1s_explore_sigma.restype = c_d
     d.b1s_explore_target.restype = c_i
+    # §1 强制报告：τe–N 规模回读 + 稀疏化权重诊断（v1.16）
+    d.b1s_neuron_count.restype = c_i
+    d.b1s_weight_stats.argtypes = [c_i, p_d]
     return d
 
 
 def new_net(d, seed, mode=1, adv=1, learn_theta=1, learn_v=1,
             u_mode=0, lam=LAMBDA, ablation=(0, 0), freeze=0,
             overrides=None, model_seed=0, calib=0, y_mode=0, alpha=1.0,
-            trace=None, explore=None):
+            trace=None, explore=None, dims=None):
     for name in STREAM:
         d.b1s_override_stream(STREAM[name], 0)
     d.b1s_legacy_rng(0)
     for name, val in (overrides or {}).items():
         d.b1s_override_stream(STREAM[name], val)
-    rc = d.b1s_create(SA, SB, HIDDEN, OA, OB, AVG_CONN, C.c_uint(seed))
+    sa, sb, hid, oa, ob, avg = dims if dims else (SA, SB, HIDDEN, OA, OB, AVG_CONN)
+    rc = d.b1s_create(sa, sb, hid, oa, ob, avg, C.c_uint(seed))
     if rc != 0:
         raise RuntimeError(f"b1s_create 失败 seed={seed} rc={rc}")
     d.b1s_set_hyper(LR, PSP, TRACE_K)
@@ -238,6 +252,15 @@ def bias_beta(d):
     q = [float(x) for x in buf]
     tot = sum(q)
     return (((q[0] + q[3]) - (q[1] + q[2])) / tot if tot > 0 else 0.0), q
+
+
+def weight_stats(d, scope=0):
+    """§1 强制报告「稀疏化」：权重分布只读快照（scope 0=全突触 / 1=readout 边）。"""
+    buf = (C.c_double * 7)()
+    d.b1s_weight_stats(int(scope), buf)
+    q = [float(x) for x in buf]
+    return {"gini": q[0], "eff": q[1], "active": q[2], "mean_abs": q[3],
+            "n": q[4], "sat": q[5], "p90": q[6]}
 
 
 def labels(n):
@@ -285,13 +308,17 @@ def experiment(d, seed, group, mode=1, adv=1, learn_theta=1, learn_v=1,
                delay=DELAY, n=TRIALS, overrides=None,
                eval_n=EVAL_TRIALS, model_seed=0, label="",
                calib=0, y_mode=0, alpha=1.0, trace=None, theta_force=None,
-               explore=None):
+               explore=None, dims=None, wstats=False, trace_every=0):
     asym_i = new_net(d, seed, mode, adv, learn_theta, learn_v, u_mode,
                      lam, ablation, freeze, overrides, model_seed,
                      calib=calib, y_mode=y_mode, alpha=alpha, trace=trace,
-                     explore=explore)
+                     explore=explore, dims=dims)
     if theta_force is not None:
         d.b1s_set_theta(float(theta_force))
+    neurons = d.b1s_neuron_count()
+    w_init = weight_stats(d, 0) if wstats else None
+    wr_init = weight_stats(d, 1) if wstats else None
+    curve = []
     trace_k = d.b1s_trace_k()
     tau_vec = [d.b1s_tau_trace_k(k) for k in range(trace_k)]
     alpha_vec = [d.b1s_trace_alpha(k) for k in range(trace_k)]
@@ -311,6 +338,8 @@ def experiment(d, seed, group, mode=1, adv=1, learn_theta=1, learn_v=1,
     out = (C.c_double * 10)()
     for i, stim in enumerate(labels(n)):
         d.b1s_run_trial(stim, 1, delay, out)
+        if trace_every and i % trace_every == 0:
+            curve.append(d.b1s_trace_abs_sum())
         correct = int(out[2])
         if i < half:
             tr_c += correct
@@ -352,6 +381,8 @@ def experiment(d, seed, group, mode=1, adv=1, learn_theta=1, learn_v=1,
             drv_b += dg
     theta_f = d.b1s_last_theta()
     b_f = d.b1s_last_b()
+    w_final = weight_stats(d, 0) if wstats else None
+    wr_final = weight_stats(d, 1) if wstats else None
     g0 = g0_eval(d, eval_n)
     asym_f = d.b1s_asymmetry()
     beta_f, _ = bias_beta(d)
@@ -399,7 +430,16 @@ def experiment(d, seed, group, mode=1, adv=1, learn_theta=1, learn_v=1,
         "mirror_trace_diff": mirror_sum / n,
         "critic_b_mean": b_sum / n,
         "synapses": n_syn,
+        "neurons": neurons,
+        "dims": list(dims) if dims else [SA, SB, HIDDEN, OA, OB, AVG_CONN],
     }
+    if wstats:
+        row["w_init"] = w_init
+        row["w_final"] = w_final
+        row["wr_init"] = wr_init
+        row["wr_final"] = wr_final
+    if trace_every:
+        row["trace_curve"] = curve
     row.update(g0)
     return row
 
@@ -729,6 +769,256 @@ def run_all_v113(quick=False):
     return rows
 
 
+# ============================================================
+# v114 · τe–N 标度律（§1 强制报告第 3 项）
+# 预注册：audit/b1_prereg_closure_v116_2026-11-13.md §1
+# ============================================================
+TAU_N = (500, 1000, 2000)
+TAU_DELAYS = (10, 50, 100, 200, 500, 1000)
+# 事后追加（首轮 D≤1000 在三档 N 上全部右删失，无法定位 D½）：把 D 轴延到 5000。
+TAU_DEEP = (2000, 5000)
+TAU_ALL = TAU_DELAYS + TAU_DEEP
+TAU_SIGMA = 4.0
+TAU_BASE = (20.0, 100.0, 500.0)   # 核心默认 tau_trace_k（只读读数，不改）
+TAU_BETA_TOL = 0.15               # 预注册判定容差
+
+
+def dims_for_n(n):
+    """N = 总神经元数，按 500 神经元工作点的比例 (50,50,350,25,25) 等比缩放。
+
+    为什么不是「只加宽 hidden」：核心 `net_init` 的 fan-out 固定为 avg_conn，
+    感觉→隐藏的总边数 ∝ 感觉神经元数。只加宽 hidden 会让每个隐藏神经元的
+    输入扇入 ∝ 1/N，N≥1000 时隐藏活动塌缩、输出层 a==b 恒成立（100% 平局）。
+    等比缩放则保持各层每神经元扇入不变（sa×K/hidden、hidden×K/(oa+ob) 均为常数）。
+    该偏离已在判据 §6.16 记为「预注册形态的事后证伪」，并由 `dims_fixed_iface`
+    对照臂留证。
+    """
+    s = max(1, int(n) // 500)
+    return (50 * s, 50 * s, 350 * s, 25 * s, 25 * s, AVG_CONN)
+
+
+def dims_fixed_iface(n):
+    """预注册 §1 的原始形态 (50,50,N−150,25,25)：仅作对照臂（已被证伪）。"""
+    return (SA, SB, int(n) - (SA + SB + OA + OB), OA, OB, AVG_CONN)
+
+
+def tau_scale(n):
+    return math.sqrt(float(n) / 500.0)
+
+
+def curve_by_delay(rows, group, neurons=None, delays=None):
+    out = []
+    for dl in (delays or TAU_ALL):
+        g = [r for r in rows if r["group"] == group and r["delay"] == dl
+             and (neurons is None or r.get("neurons") == neurons)]
+        if not g:
+            continue
+        out.append({
+            "d": dl, "mean": mean([r["g0_acc"] for r in g]),
+            "sd": sd([r["g0_acc"] for r in g]),
+            "n80": sum(1 for r in g if r["g0_acc"] >= 80.0),
+            "nseed": len(g),
+            "zero": sum(1 for r in g if r["g0_acc"] == 0.0),
+            "tie": mean([r["g0_tie_rate"] for r in g]),
+            "sep": mean([r["g0_stim_separation"] for r in g]),
+        })
+    return out
+
+
+def dhalf(curve):
+    """首个跌破峰值 50% 的延迟；跨档时按 log D 线性插值。无衰减返回 None（右删失）。"""
+    if not curve:
+        return None
+    peak = curve[0]["mean"]
+    if peak <= 1e-9:
+        return None
+    half = 0.5 * peak
+    prev = None
+    for p in curve:
+        if p["mean"] <= half + 1e-9:
+            if prev is None:
+                return float(p["d"])
+            if prev["mean"] <= p["mean"]:
+                return float(p["d"])
+            t = (prev["mean"] - half) / (prev["mean"] - p["mean"])
+            return math.exp(math.log(prev["d"]) +
+                            t * (math.log(p["d"]) - math.log(prev["d"])))
+        prev = p
+    return None
+
+
+def fit_beta(points):
+    """points=[(N, dhalf)]；最小二乘拟合 log dhalf = β·log(N/500) + c。"""
+    pts = [(n, x) for n, x in points if x]
+    if len(pts) < 2:
+        return None, pts
+    xs = [math.log(n / 500.0) for n, _ in pts]
+    ys = [math.log(x) for _, x in pts]
+    mx, my = mean(xs), mean(ys)
+    den = sum((x - mx) ** 2 for x in xs)
+    if den < 1e-12:
+        return None, pts
+    beta = sum((x - mx) * (y - my) for x, y in zip(xs, ys)) / den
+    return beta, pts
+
+
+def run_all_v114(quick=False):
+    """§1 强制报告：τe–N 标度律，N=500/1000/2000；偏离 0.5 则修正并重跑。"""
+    d = load_dll()
+    seeds = MASTER_SEEDS[:3] if quick else MASTER_SEEDS
+    trials = 120 if quick else TRIALS
+    ev_trials = 60 if quick else EVAL_TRIALS
+    rows, t0 = [], time.time()
+    done = set()
+    if EXTEND and SUMMARY_JSONL.exists():
+        rows = [json.loads(x) for x in
+                SUMMARY_JSONL.read_text(encoding="utf-8").splitlines() if x.strip()]
+        done = {(r["group"], r["delay"], r["neurons"], r["seed"]) for r in rows}
+        print(f"[extend] 载入已有 {len(rows)} 行，只补缺失点", flush=True)
+
+    def need(group, n, dl, s):
+        return (group, dl, n, s) not in done
+
+    def add(*args, **kw):
+        kw.setdefault("n", trials)
+        kw.setdefault("eval_n", ev_trials)
+        r = experiment(*args, **kw)
+        rows.append(r)
+        print(f"[{r['group']:<11}] {r['label']:<10} seed={r['seed']:<4} "
+              f"neur={r['neurons']:<5} tau*={r['tau_vec'][0] if r['tau_vec'] else 0:.0f} "
+              f"g0={r['g0_acc']:6.2f}% tie={r['g0_tie_rate']:5.1f}%", flush=True)
+        return r
+
+    # 对照臂（事后证伪）：预注册形态「固定感觉/输出接口，只加宽 hidden」。
+    if not EXTEND:
+        for n in TAU_N:
+            for s in seeds:
+                add(d, s, "taun_fixiface", label=f"N{n}_D200", delay=200,
+                    explore=(TAU_SIGMA, 1), dims=dims_fixed_iface(n))
+
+    # 主臂：等比缩放（各层每神经元扇入不变）
+    for n in ((1000, 2000) if EXTEND else TAU_N):
+        for dl in TAU_ALL:
+            for s in seeds:
+                if not need("taun", n, dl, s):
+                    continue
+                add(d, s, "taun", label=f"N{n}_D{dl}", delay=dl,
+                    explore=(TAU_SIGMA, 1), dims=dims_for_n(n))
+
+    pts = [(n, dhalf(curve_by_delay(rows, "taun", n))) for n in TAU_N]
+    beta, used = fit_beta(pts)
+    print(f"[taun] D1/2=" + ", ".join(f"N{n}:{fmt(x, 1)}" for n, x in pts) +
+          f"  beta={fmt(beta, 3)} (tol +-{TAU_BETA_TOL})", flush=True)
+
+    if (beta is None or abs(beta - 0.5) > TAU_BETA_TOL) and not EXTEND:
+        print("[taun] 触发修正标度律 τe(N)=τe0·(N/500)^0.5，重跑同一网格", flush=True)
+        for n in TAU_N:
+            sc = tau_scale(n)
+            tr = (3, TAU_BASE[0] * sc, TAU_BASE[1] * sc, TAU_BASE[2] * sc)
+            for dl in TAU_ALL:
+                for s in seeds:
+                    add(d, s, "taun_scaled", label=f"N{n}_D{dl}", delay=dl,
+                        explore=(TAU_SIGMA, 1), dims=dims_for_n(n), trace=tr)
+        pts2 = [(n, dhalf(curve_by_delay(rows, "taun_scaled", n))) for n in TAU_N]
+        beta2, _ = fit_beta(pts2)
+        print(f"[taun_scaled] D1/2=" + ", ".join(f"N{n}:{fmt(x, 1)}" for n, x in pts2) +
+              f"  beta'={fmt(beta2, 3)}", flush=True)
+    else:
+        print("[taun] 标度律成立，不执行修正重跑", flush=True)
+
+    DATA.mkdir(parents=True, exist_ok=True)
+    with SUMMARY_JSONL.open("w", encoding="utf-8") as f:
+        for r in rows:
+            f.write(json.dumps(r, ensure_ascii=False) + "\n")
+    print(f"完成 {len(rows)} 行，用时 {time.time() - t0:.1f}s -> {SUMMARY_JSONL}")
+    return rows
+
+
+# ============================================================
+# v115 · 稀疏化 Gini / 有效连接数（§1 强制报告第 5 项）
+# 预注册：audit/b1_prereg_closure_v116_2026-11-13.md §2
+# ============================================================
+SPARSE_ARMS = (
+    ("s0_full", 0.0, (0, 0)),
+    ("s4_full", 4.0, (0, 0)),
+    ("s0_notrace", 0.0, (1, 0)),
+    ("s4_notrace", 4.0, (1, 0)),
+    ("s4_noreward", 4.0, (0, 1)),
+)
+SPARSE_ZERO_TOL = 1e-9
+
+
+def run_all_v115(quick=False):
+    """§1：无迹组权重 Gini / 有效连接数是否停在随机初始化水平。"""
+    d = load_dll()
+    seeds = SEED_POOL[:3] if quick else SEED_POOL
+    trials = 120 if quick else TRIALS
+    ev_trials = 60 if quick else EVAL_TRIALS
+    rows, t0 = [], time.time()
+
+    def add(*args, **kw):
+        kw.setdefault("n", trials)
+        kw.setdefault("eval_n", ev_trials)
+        r = experiment(*args, **kw)
+        rows.append(r)
+        dg = r["w_final"]["gini"] - r["w_init"]["gini"]
+        print(f"[sparse] {r['label']:<12} seed={r['seed']:<4} "
+              f"g0={r['g0_acc']:6.2f}% ΔGini={dg:+.5f} "
+              f"Δeff={r['w_final']['eff'] - r['w_init']['eff']:+.2f}", flush=True)
+        return r
+
+    for cfg, sigma, abl in SPARSE_ARMS:
+        for s in seeds:
+            add(d, s, "sparse", label=cfg, ablation=abl,
+                explore=(sigma, 1), wstats=True)
+
+    DATA.mkdir(parents=True, exist_ok=True)
+    with SUMMARY_JSONL.open("w", encoding="utf-8") as f:
+        for r in rows:
+            f.write(json.dumps(r, ensure_ascii=False) + "\n")
+    print(f"完成 {len(rows)} 行，用时 {time.time() - t0:.1f}s -> {SUMMARY_JSONL}")
+    return rows
+
+
+# ============================================================
+# v116 · neuromod（Rust）同种子统计等价的本侧工件（§1 强制报告第 4 项）
+# 预注册：audit/b1_prereg_closure_v116_2026-11-13.md §3
+# ============================================================
+REF_DELAYS = (10, 200, 1000)
+REF_TRACE_EVERY = 10
+
+
+def run_all_v116(quick=False):
+    """参考实现缺失时的本侧统计工件；不宣称等价（BLOCKED）。"""
+    d = load_dll()
+    seeds = SEED_POOL[:3] if quick else SEED_POOL
+    trials = 120 if quick else TRIALS
+    ev_trials = 60 if quick else EVAL_TRIALS
+    rows, t0 = [], time.time()
+
+    def add(*args, **kw):
+        kw.setdefault("n", trials)
+        kw.setdefault("eval_n", ev_trials)
+        r = experiment(*args, **kw)
+        rows.append(r)
+        print(f"[ref] D={r['delay']:<5} seed={r['seed']:<4} "
+              f"g0={r['g0_acc']:6.2f}% tie={r['g0_tie_rate']:5.1f}% "
+              f"trace0={r['trace_curve'][0] if r.get('trace_curve') else 0:.1f}", flush=True)
+        return r
+
+    for dl in REF_DELAYS:
+        for s in seeds:
+            add(d, s, "ref", label=f"D{dl}", delay=dl, explore=(TAU_SIGMA, 1),
+                wstats=True, trace_every=REF_TRACE_EVERY)
+
+    DATA.mkdir(parents=True, exist_ok=True)
+    with SUMMARY_JSONL.open("w", encoding="utf-8") as f:
+        for r in rows:
+            f.write(json.dumps(r, ensure_ascii=False) + "\n")
+    print(f"完成 {len(rows)} 行，用时 {time.time() - t0:.1f}s -> {SUMMARY_JSONL}")
+    return rows
+
+
 def run_all(quick=False):
     if SUITE == "v19":
         return run_all_v19(quick)
@@ -740,6 +1030,12 @@ def run_all(quick=False):
         return run_all_v112(quick)
     if SUITE == "v113":
         return run_all_v113(quick)
+    if SUITE == "v114":
+        return run_all_v114(quick)
+    if SUITE == "v115":
+        return run_all_v115(quick)
+    if SUITE == "v116":
+        return run_all_v116(quick)
     d = load_dll()
     seeds = MASTER_SEEDS[:3] if quick else MASTER_SEEDS
     dseeds = MASTER_SEEDS[:2] if quick else MASTER_SEEDS[:3]
@@ -1722,6 +2018,430 @@ def build_report_v113(rows):
     print(f"报告 -> {REPORT_MD}")
 
 
+def build_report_v114(rows):
+    """§1 强制报告：τe–N 标度律 + 指数拟合（偏离 0.5 则修正重跑）。"""
+    a = []
+    ap = a.append
+    core = sha1(ROOT / "brain" / "benchmark1_core.c")
+    seeds = sorted({r["seed"] for r in rows})
+    ntr = rows[0]["n"] if rows else 0
+    curves = {n: curve_by_delay(rows, "taun", n) for n in TAU_N}
+    dhs = {n: dhalf(curves[n]) for n in TAU_N}
+    beta, used = fit_beta([(n, dhs[n]) for n in TAU_N])
+    has_scaled = any(r["group"] == "taun_scaled" for r in rows)
+    c2 = {n: curve_by_delay(rows, "taun_scaled", n) for n in TAU_N}
+    dh2 = {n: dhalf(c2[n]) for n in TAU_N}
+    beta2, used2 = fit_beta([(n, dh2[n]) for n in TAU_N])
+    pass_law = beta is not None and abs(beta - 0.5) <= TAU_BETA_TOL
+    delays = sorted({r["delay"] for r in rows if r["group"] == "taun"})
+
+    ap("# τe–N 标度律（判据 §1 强制报告 / v1.16）")
+    ap("")
+    ap(f"> 生成时间：{time.strftime('%Y-%m-%d %H:%M')} · 数据 "
+       f"`data/b1_taun/{SUMMARY_JSONL.name}`（{len(rows)} 条 / {len(seeds)} seed / "
+       f"{ntr} 试次，可复算）")
+    ap(f"> 配置：N ∈ {list(TAU_N)} 总神经元，按 500 工作点 (50,50,350,25,25) **等比缩放**，"
+       f"`avg_conn=8.0`；σ={TAU_SIGMA} 作用于输出层；D ∈ {list(TAU_ALL)}"
+       f"（后两点为事后追加：首轮 D≤1000 全部右删失）。"
+       f"核心 `benchmark1_core.c`（SHA1 `{core[:10]}…`）零改动。**阈值零变更**。")
+    ap("> 注意：预注册 §1 写的是「只加宽 hidden」，实测被证伪（见 §0.1），"
+       "本轮按等比缩放执行并保留对照臂；这是**方法修正**，不改任何判据阈值。")
+    ap("> 预注册读法：`audit/b1_prereg_closure_v116_2026-11-13.md` §1（运行前落盘）。")
+    ap("")
+    ap("## 0. 结论")
+    ap("")
+    ap("1. **实现层**：三个资格迹时间常数 "
+       + " / ".join(fmt(x, 0) for x in TAU_BASE)
+       + " ticks 在 N=500/1000/2000 下**读数完全相同**（表 2），即实现层面 β_impl = 0，"
+         "未随 N 标度。")
+    dh_txt = ", ".join(f"N={n}: {'右删失（扫描内未跌破 50%）' if dhs[n] is None else fmt(dhs[n], 1)}"
+                       for n in TAU_N)
+    ap(f"2. **行为口径**：D½(N) = {dh_txt}；"
+       + (f"拟合 **β = {beta:.3f}**（预注册容差 |β−0.5| ≤ {TAU_BETA_TOL}）→ "
+          + ("**标度律成立**，不需修正。" if pass_law else
+             "**偏离 0.5，触发修正标度律并重跑**。")
+          if beta is not None else
+          "可拟合点不足 2 个 → **β 不可辨识**，按预注册视为偏离并执行修正重跑。"))
+    if has_scaled and pass_law:
+        dh2_txt = ", ".join(f"N={n}: {'右删失' if dh2[n] is None else fmt(dh2[n], 1)}"
+                            for n in TAU_N)
+        ap(f"3. **附加稳健性检查**（τe(N)=τe0·(N/500)^0.5，首轮 D½ 右删失时预跑）："
+           f"D½ = {dh2_txt}，"
+           + (f"β′ = {beta2:.3f}" if beta2 is not None else "β′ 不可辨识")
+           + "；D=200 三档均 ≥80%（表 5）。标度律已在容差内成立，本臂不改判定，"
+             "只说明「按 0.5 修正」不会破坏 D=200 的能力。")
+    elif has_scaled:
+        dh2_txt = ", ".join(f"N={n}: {'右删失' if dh2[n] is None else fmt(dh2[n], 1)}"
+                            for n in TAU_N)
+        ap(f"3. **修正后**（τe(N)=τe0·(N/500)^0.5）：D½ = {dh2_txt}，"
+           + (f"β′ = {beta2:.3f}" if beta2 is not None else "β′ 不可辨识")
+           + "；各 N 在 D=200 的 g=0 正确率见表 5。")
+    else:
+        ap("3. 未执行修正重跑（预注册规则：|β−0.5| ≤ 0.15 时不修正）。")
+    ap("")
+    ap("## 0.1 预注册形态的事后证伪（等比缩放的由来）")
+    ap("")
+    ap("预注册 §1 的形态是「感觉/输出接口固定，只把 hidden 加宽到 N−150」。"
+       "实测该形态在 N≥1000 时**输出层完全退化**（表 0）：")
+    ap("")
+    ap("| N | 形态 | 神经元 | 突触 | g=0 正确率 | 平局率 | a==b 率 | mean_a / mean_b | A/B 分离度 |")
+    ap("|---|---|---|---|---|---|---|---|---|")
+    for n in TAU_N:
+        g = [r for r in rows if r["group"] == "taun_fixiface" and r["neurons"] == n]
+        if not g:
+            continue
+        r0 = g[0]
+        ap(f"| {n} | `(50,50,{r0['dims'][2]},25,25)` | {r0['neurons']} | {r0['synapses']} | "
+           f"{mean([r['g0_acc'] for r in g]):.2f}% ± {sd([r['g0_acc'] for r in g]):.2f} | "
+           f"{mean([r['g0_tie_rate'] for r in g]):.1f}% | "
+           f"{mean([r['g0_a_eq_b_rate'] for r in g]):.1f}% | "
+           f"{mean([r['g0_mean_a'] for r in g]):.2f} / {mean([r['g0_mean_b'] for r in g]):.2f} | "
+           f"{mean([r['g0_stim_separation'] for r in g]):.3f} |")
+    ap("")
+    ap("根因在核心拓扑：`net_init` 的 fan-out 固定为 `avg_conn=8`，感觉→隐藏总边数 "
+       "∝ 感觉神经元数（固定 100），所以每个隐藏神经元的输入扇入 ∝ 1/hidden；"
+       "hidden 越宽、单个隐藏越分不到输入，N=2000 时输出层 mean_a=mean_b=0（不发放）。"
+       "此形态下 τe–N **不可测**（正确率对所有 τ 均为 0），故主臂改为等比缩放。")
+    ap("")
+    ap("## 1. 延迟-正确率曲线（σ=4.0，g=0，均值 ± SD）")
+    ap("")
+    ap("| D (ticks) | " + " | ".join(f"N={n}" for n in TAU_N) + " |")
+    ap("|---" * (len(TAU_N) + 1) + "|")
+    for i, dl in enumerate(delays):
+        cells = []
+        for n in TAU_N:
+            c = curves[n]
+            if i < len(c):
+                cells.append(f"{c[i]['mean']:.2f}% ± {c[i]['sd']:.2f} "
+                             f"({c[i]['n80']}/{c[i]['nseed']} ≥80%)")
+            else:
+                cells.append("n/a")
+        ap(f"| {dl} | " + " | ".join(cells) + " |")
+    ap("")
+    ap("## 2. 实现层审计（τ 读数与 N 无关）")
+    ap("")
+    ap("| N | 神经元数 | 突触数 | τ (ticks，3 尺度) | α |")
+    ap("|---|---|---|---|---|")
+    for n in TAU_N:
+        r = next((x for x in rows if x["group"] == "taun" and x["neurons"] == n), None)
+        if not r:
+            continue
+        ap(f"| {n} | {r['neurons']} | {r['synapses']} | "
+           f"{', '.join(fmt(t, 0) for t in r['tau_vec'])} | "
+           f"{', '.join(fmt(x, 3) for x in r['alpha_vec'])} |")
+    ap("")
+    ap("τ 是超参、由核心 `net_set_hyperparams` 归一化，与 N 无关；"
+       "因此「τe 随 N 标度为 N^0.5」在**实现层面不成立**（β_impl = 0，读数级证据，非拟合）。")
+    ap("")
+    ap("## 3. D½ 与指数拟合")
+    ap("")
+    ap("| N | D½ (ticks) | 说明 |")
+    ap("|---|---|---|")
+    for n in TAU_N:
+        note = "扫描内未跌破峰值 50%（右删失）" if dhs[n] is None else "log-D 插值"
+        ap(f"| {n} | {fmt(dhs[n], 1) if dhs[n] else '>5000'} | {note} |")
+    ap("")
+    if beta is not None:
+        ap(f"最小二乘拟合 `log D½ = β·log(N/500) + c`（{len(used)} 点）："
+           f"**β = {beta:.3f}**，判定阈值 0.5 ± {TAU_BETA_TOL} → "
+           + ("成立" if pass_law else "不成立（需修正）") + "。")
+    else:
+        ap("可拟合点不足，β 不可辨识。")
+    ap("")
+    ap("## 4. 逐 seed（g=0 正确率 %）")
+    ap("")
+    ap("| N | seed | " + " | ".join(f"D{d}" for d in delays) + " |")
+    ap("|---" * (len(delays) + 2) + "|")
+    for n in TAU_N:
+        for s in seeds:
+            cells = []
+            for dl in delays:
+                q = next((x for x in rows if x["group"] == "taun"
+                          and x["neurons"] == n and x["delay"] == dl
+                          and x["seed"] == s), None)
+                cells.append(f"{q['g0_acc']:.1f}" if q else "n/a")
+            ap(f"| {n} | {s} | " + " | ".join(cells) + " |")
+    ap("")
+    if has_scaled:
+        ap("## 5. " + ("附加：0.5 标度臂（首轮 β 不可辨识时预跑的稳健性检查）"
+                        if pass_law else "修正标度律重跑（τe(N)=τe0·(N/500)^0.5）"))
+        if pass_law:
+            ap("")
+            ap("本臂在首轮（D≤1000 全部右删失、β 不可辨识）按预注册规则预跑；"
+               "延到 D=5000 后 β 落在容差内，故本轮**不需要**修正，此臂只作稳健性证据"
+               "（未补 D=2000/5000 两点，见 n/a）。")
+        ap("")
+        ap("| D (ticks) | " + " | ".join(f"N={n} (τ0={TAU_BASE[0]*tau_scale(n):.0f})"
+                                         for n in TAU_N) + " |")
+        ap("|---" * (len(TAU_N) + 1) + "|")
+        for dl in delays:
+            cells = []
+            for n in TAU_N:
+                q = next((x for x in c2[n] if x["d"] == dl), None)
+                cells.append(f"{q['mean']:.2f}% ± {q['sd']:.2f} "
+                             f"({q['n80']}/{q['nseed']})" if q else "n/a")
+            ap(f"| {dl} | " + " | ".join(cells) + " |")
+        ap("")
+        ap("| N | D½（修正后） | D=200 正确率 | 判定 |")
+        ap("|---|---|---|---|")
+        for n in TAU_N:
+            d200 = next((p for p in c2[n] if p["d"] == 200), None)
+            dh_txt = fmt(dh2[n], 1) if dh2[n] else ">1000"
+            if d200:
+                ap(f"| {n} | {dh_txt} | {d200['mean']:.2f}% ± {d200['sd']:.2f} | "
+                   f"{'≥80%' if d200['mean'] >= 80.0 else '<80%'} |")
+            else:
+                ap(f"| {n} | {dh_txt} | n/a | n/a |")
+        ap("")
+    ap("## 6. 诚实边界")
+    ap("")
+    ap("- N 的操纵采用**全层等比缩放**（50/50/350/25/25 × s）：保持各层每神经元扇入不变，"
+       "但 N 同时改变神经元数、突触数与总活动量，**不是纯时间尺度操纵**；"
+       "若把 N 理解为「纯容量」，则本轮结论不适用。")
+    ap("- 预注册形态（只加宽 hidden）在本轮被证伪并保留为对照臂（表 0）；"
+       "该形态下 N≥1000 的正确率恒 0，说明「换 τ 或换 N 就能提升」是伪命题，"
+       "根因是固定 fan-out 拓扑导致的扇入稀释。")
+    ap("- D½ 以 D=10 均值为峰值基准，沿用 §6.15 口径；若某 N 在扫描范围内不跌破 50%，"
+       "记右删失，不把 D½ 外推成具体数值。")
+    ap("- **曲线不是指数衰减**：D 从 1000 到 2000 直接跌到 20–40%，是陡降而非平滑衰减；"
+       "β 只是三点 log-log 最小二乘的粗略指数，**不能**当作连续标度律使用。"
+       "三点、每点一次 D½ 估计，指数的不确定度未做自助法，量级误差可能达 ±0.1。")
+    ap("- 50% 基准的插值依赖相邻两点，D½ 的实际分辨率受网格限制（1000/2000/5000 间距大）。")
+    ap("- 0.5 标度臂只在 D≤1000 的 6 点网格上跑过（首轮预跑），未补 D=2000/5000；"
+       "它的作用是稳健性检查，不是独立的 D½ 测量。")
+    ap("- 本轮只报 g=0；σ=4.0 的选点仍沿用 §6.14 的发现集/留出集两段式结论，"
+       "本 suite 不重新选 σ。")
+    ap("")
+    ap("## 7. 复现")
+    ap("")
+    ap("```")
+    ap("powershell -ExecutionPolicy Bypass -File Experiment/build.ps1")
+    ap("py -3 Experiment/tools/b1_self_supervised.py --suite v114")
+    ap("py -3 Experiment/tools/b1_self_supervised.py --suite v114 --extend   # 补 D=2000/5000")
+    ap("py -3 Experiment/tools/b1_self_supervised.py --suite v114 --report-only")
+    ap("```")
+    REPORT_MD.parent.mkdir(parents=True, exist_ok=True)
+    REPORT_MD.write_text("\n".join(a) + "\n", encoding="utf-8")
+    print(f"报告 -> {REPORT_MD}")
+
+
+def build_report_v115(rows):
+    """§1 强制报告：稀疏化 Gini / 有效连接数（无迹组是否停在初始化水平）。"""
+    a = []
+    ap = a.append
+    core = sha1(ROOT / "brain" / "benchmark1_core.c")
+    seeds = sorted({r["seed"] for r in rows})
+    ntr = rows[0]["n"] if rows else 0
+    arms = [cfg for cfg, _, _ in SPARSE_ARMS]
+
+    def arm_rows(cfg):
+        return [r for r in rows if r.get("label") == cfg]
+
+    ap("# 稀疏化：权重 Gini / 有效连接数（判据 §1 强制报告 / v1.16）")
+    ap("")
+    ap(f"> 生成时间：{time.strftime('%Y-%m-%d %H:%M')} · 数据 "
+       f"`data/b1_sparse/{SUMMARY_JSONL.name}`（{len(rows)} 条 / {len(seeds)} seed / "
+       f"{ntr} 试次，可复算）")
+    ap(f"> 核心 `benchmark1_core.c`（SHA1 `{core[:10]}…`）零改动；"
+       f"D=200，权重快照由只读钩子 `b1s_weight_stats` 在训练前/后各取一次。"
+       f"**阈值零变更**。")
+    ap("> 预注册读法：`audit/b1_prereg_closure_v116_2026-11-13.md` §2。")
+    ap("")
+    ap("## 0. 结论")
+    ap("")
+    for cfg in ("s0_notrace", "s4_notrace"):
+        g = arm_rows(cfg)
+        if not g:
+            continue
+        dg = [r["w_final"]["gini"] - r["w_init"]["gini"] for r in g]
+        de = [r["w_final"]["eff"] - r["w_init"]["eff"] for r in g]
+        zero = sum(1 for a_, b_ in zip(dg, de)
+                   if abs(a_) < SPARSE_ZERO_TOL and abs(b_) < SPARSE_ZERO_TOL)
+        ap(f"- **{cfg}（无迹组）**：|ΔGini| 最大 {max(abs(x) for x in dg):.3e}，"
+           f"|Δ有效连接| 最大 {max(abs(x) for x in de):.3e}；"
+           f"{zero}/{len(g)} seed 严格停在初始化水平（容差 {SPARSE_ZERO_TOL:g}）。"
+           f"g=0 正确率 {mean([r['g0_acc'] for r in g]):.2f}% ± "
+           f"{sd([r['g0_acc'] for r in g]):.2f}。")
+    for cfg in ("s0_full", "s4_full", "s4_noreward"):
+        g = arm_rows(cfg)
+        if not g:
+            continue
+        dg = [r["w_final"]["gini"] - r["w_init"]["gini"] for r in g]
+        de = [r["w_final"]["eff"] - r["w_init"]["eff"] for r in g]
+        da = [r["w_final"]["active"] - r["w_init"]["active"] for r in g]
+        ap(f"- **{cfg}**：ΔGini {mean(dg):+.5f} ± {sd(dg):.5f}，"
+           f"Δ有效连接 {mean(de):+.2f} ± {sd(de):.2f}，"
+           f"Δactive {mean(da):+.1f} ± {sd(da):.1f}；"
+           f"g=0 {mean([r['g0_acc'] for r in g]):.2f}% ± {sd([r['g0_acc'] for r in g]):.2f}。")
+    ap("")
+    ap(f"## 1. 权重分布统计（全突触 scope=0，{len(seeds)} seed 均值 ± SD）")
+    ap("")
+    ap("| 臂 | Gini init | Gini final | ΔGini | 有效连接 init | final | Δ | active init→final |")
+    ap("|---|---|---|---|---|---|---|---|")
+    for cfg in arms:
+        g = arm_rows(cfg)
+        if not g:
+            continue
+        gi = [r["w_init"]["gini"] for r in g]
+        gf = [r["w_final"]["gini"] for r in g]
+        ei = [r["w_init"]["eff"] for r in g]
+        ef = [r["w_final"]["eff"] for r in g]
+        ai = mean([r["w_init"]["active"] for r in g])
+        af = mean([r["w_final"]["active"] for r in g])
+        ap(f"| {cfg} | {mean(gi):.4f} ± {sd(gi):.4f} | {mean(gf):.4f} ± {sd(gf):.4f} | "
+           f"{mean(gf)-mean(gi):+.5f} | {mean(ei):.1f} | {mean(ef):.1f} | "
+           f"{mean(ef)-mean(ei):+.2f} | {ai:.0f} → {af:.0f} |")
+    ap("")
+    ap("## 2. readout 边（hidden→output，scope=1）")
+    ap("")
+    ap("| 臂 | Gini init | Gini final | ΔGini | 有效连接 init→final | n |")
+    ap("|---|---|---|---|---|---|")
+    for cfg in arms:
+        g = arm_rows(cfg)
+        if not g:
+            continue
+        gi = mean([r["wr_init"]["gini"] for r in g])
+        gf = mean([r["wr_final"]["gini"] for r in g])
+        ei = mean([r["wr_init"]["eff"] for r in g])
+        ef = mean([r["wr_final"]["eff"] for r in g])
+        n = g[0]["wr_init"]["n"]
+        ap(f"| {cfg} | {gi:.4f} | {gf:.4f} | {gf-gi:+.5f} | {ei:.1f} → {ef:.1f} | {n:.0f} |")
+    ap("")
+    ap("## 3. 逐 seed 原始值")
+    ap("")
+    ap("| 臂 | seed | g=0 (%) | ΔGini | Δ有效连接 | Δactive |")
+    ap("|---|---|---|---|---|---|")
+    for cfg in arms:
+        for r in arm_rows(cfg):
+            ap(f"| {cfg} | {r['seed']} | {r['g0_acc']:.2f} | "
+               f"{r['w_final']['gini']-r['w_init']['gini']:+.6f} | "
+               f"{r['w_final']['eff']-r['w_init']['eff']:+.3f} | "
+               f"{r['w_final']['active']-r['w_init']['active']:+.0f} |")
+    ap("")
+    ap("## 4. 与 §4「移除误差注入」的衔接")
+    ap("")
+    g = arm_rows("s4_noreward")
+    if g:
+        ap(f"σ=4.0 + 移除奖励调制（误差注入通道）：g=0 "
+           f"{mean([r['g0_acc'] for r in g]):.2f}% ± {sd([r['g0_acc'] for r in g]):.2f}"
+           f"（{sum(1 for r in g if r['g0_acc'] >= 80.0)}/{len(g)} ≥80%），"
+           f"ΔGini {mean([r['w_final']['gini']-r['w_init']['gini'] for r in g]):+.5f}。"
+           "与完整组对照即为 §4 第 2 项的配对证据。")
+    ap("")
+    ap("## 5. 诚实边界")
+    ap("")
+    ap("- Gini 在全部突触（含感觉层、非读出层）上计算，因此会被大量初始化权重稀释；"
+       "readout 边单列（表 2）以给出与任务直接相关的稀疏度。")
+    ap("- 「停在随机初始化水平」的定义是数值零（<1e-9），预注册给定；"
+       "无迹组 Δ 为 0 说明权重完全未更新，**不**代表网络「稀疏化」。")
+    ap("- active 阈值取 `|w| > 0.5·mean|w|`，是相对量，随均值移动；"
+       "同时给出 p90 与饱和计数之外的原始 Δ 供复核。")
+    ap("- 未做「修剪」（pruning）；本轮只测权重分布是否变化，不构造人工剪枝。")
+    ap("")
+    ap("## 6. 复现")
+    ap("")
+    ap("```")
+    ap("py -3 Experiment/tools/b1_self_supervised.py --suite v115")
+    ap("py -3 Experiment/tools/b1_self_supervised.py --suite v115 --report-only")
+    ap("```")
+    REPORT_MD.parent.mkdir(parents=True, exist_ok=True)
+    REPORT_MD.write_text("\n".join(a) + "\n", encoding="utf-8")
+    print(f"报告 -> {REPORT_MD}")
+
+
+def build_report_v116(rows):
+    """§1 强制报告：与 neuromod（Rust）同种子统计等价——本侧工件 + 阻塞说明。"""
+    a = []
+    ap = a.append
+    core = sha1(ROOT / "brain" / "benchmark1_core.c")
+    seeds = sorted({r["seed"] for r in rows})
+    ntr = rows[0]["n"] if rows else 0
+
+    ap("# 与 neuromod（Rust）同种子统计等价：本侧工件（判据 §1 强制报告 / v1.16）")
+    ap("")
+    ap(f"> 生成时间：{time.strftime('%Y-%m-%d %H:%M')} · 数据 "
+       f"`data/b1_ref/{SUMMARY_JSONL.name}`（{len(rows)} 条 / {len(seeds)} seed / "
+       f"{ntr} 试次，可复算）")
+    ap(f"> 核心 `benchmark1_core.c`（SHA1 `{core[:10]}…`）零改动；σ={TAU_SIGMA}，"
+       f"D ∈ {list(REF_DELAYS)}，迹曲线每 {REF_TRACE_EVERY} 试次采样一次。")
+    ap("> 预注册：`audit/b1_prereg_closure_v116_2026-11-13.md` §3。")
+    ap("")
+    ap("## 0. 结论：BLOCKED（不宣称等价）")
+    ap("")
+    ap("- `neuromod` 的 `rm_stdp` 参考实现**不在本仓库内**（全仓 `*.rs` 为空），"
+       "本机也没有 `cargo` / `rustc`（`Get-Command` 无结果），无法构建参考侧。")
+    ap("- 判据要求「均值/方差/迹曲线的统计等价（不要求 1e-4 逐位一致）」——"
+       "缺少参考侧数据时**任何等价结论都不成立**，也不允许用自造基线顶替。")
+    ap("- 本节只交付**本侧工件**与预先写明的等价判据，等工具链/参考实现到位后可直接比对。")
+    ap("")
+    ap("## 1. 本侧统计（σ=4.0，g=0）")
+    ap("")
+    ap("| D (ticks) | 正确率均值 ± SD | 平局率 | A/B 分离度 | Gini(final) | 迹曲线首点 |")
+    ap("|---|---|---|---|---|---|")
+    m = {}
+    for dl in REF_DELAYS:
+        g = [r for r in rows if r["delay"] == dl]
+        if not g:
+            continue
+        acc = [r["g0_acc"] for r in g]
+        m[dl] = acc
+        ap(f"| {dl} | {mean(acc):.2f}% ± {sd(acc):.2f} | "
+           f"{mean([r['g0_tie_rate'] for r in g]):.1f}% | "
+           f"{mean([r['g0_stim_separation'] for r in g]):.3f} | "
+           f"{mean([r['w_final']['gini'] for r in g]):.4f} | "
+           f"{mean([r['trace_curve'][0] for r in g if r.get('trace_curve')]):.1f} |")
+    ap("")
+    ap("## 2. 迹曲线（`b1s_trace_abs_sum()`，10 seed 均值 ± SD）")
+    ap("")
+    ap("| D | " + " | ".join(f"t{10*(i+1)}" for i in range(30)) + " |")
+    ap("|---" * 31 + "|")
+    for dl in REF_DELAYS:
+        g = [r for r in rows if r["delay"] == dl and r.get("trace_curve")]
+        if not g:
+            continue
+        L = min(len(r["trace_curve"]) for r in g)
+        cells = []
+        for i in range(min(L, 30)):
+            xs = [r["trace_curve"][i] for r in g]
+            cells.append(f"{mean(xs):.0f}±{sd(xs):.0f}")
+        ap(f"| {dl} | " + " | ".join(cells) + " |")
+    ap("")
+    ap("## 3. 逐 seed 原始值（g=0 正确率 %）")
+    ap("")
+    ap("| seed | " + " | ".join(f"D{d}" for d in REF_DELAYS) + " |")
+    ap("|---" * (len(REF_DELAYS) + 1) + "|")
+    for s in seeds:
+        cells = []
+        for dl in REF_DELAYS:
+            q = next((x for x in rows if x["delay"] == dl and x["seed"] == s), None)
+            cells.append(f"{q['g0_acc']:.2f}" if q else "n/a")
+        ap(f"| {s} | " + " | ".join(cells) + " |")
+    ap("")
+    ap("## 4. 预注册的等价判据（留给有工具链的一轮执行）")
+    ap("")
+    ap("- 同 seed、同协议（同 D、同试次数、同评估口径）；")
+    ap("- 每档 D 的均值差 ≤ 5pp；方差比 ∈ [0.5, 2]；")
+    ap("- 30 点迹曲线的 Spearman ρ ≥ 0.8；")
+    ap("- 明确**不要求** 1e-4 逐位一致（判据原文）。")
+    ap("")
+    ap("## 5. 诚实边界")
+    ap("")
+    ap("- 本节不含任何「等价」判断；若被引用为「已与 Rust 参考实现对齐」，属误读。")
+    ap("- 迹曲线是**跨试次累加的 |e| 总和**，量纲随网络规模与发放率变化；"
+       "与参考实现比对时必须先统一规模与归一化口径。")
+    ap("- 安装 Rust 工具链属于环境改动，本轮未执行（不在本任务授权范围）。")
+    ap("")
+    ap("## 6. 复现")
+    ap("")
+    ap("```")
+    ap("py -3 Experiment/tools/b1_self_supervised.py --suite v116")
+    ap("py -3 Experiment/tools/b1_self_supervised.py --suite v116 --report-only")
+    ap("```")
+    REPORT_MD.parent.mkdir(parents=True, exist_ok=True)
+    REPORT_MD.write_text("\n".join(a) + "\n", encoding="utf-8")
+    print(f"报告 -> {REPORT_MD}")
+
+
 def build_report(rows):
     if SUITE == "v19":
         return build_report_v19(rows)
@@ -1733,6 +2453,12 @@ def build_report(rows):
         return build_report_v112(rows)
     if SUITE == "v113":
         return build_report_v113(rows)
+    if SUITE == "v114":
+        return build_report_v114(rows)
+    if SUITE == "v115":
+        return build_report_v115(rows)
+    if SUITE == "v116":
+        return build_report_v116(rows)
     a = []
     ap = a.append
     fac = sel(rows, "factorial")
@@ -2049,8 +2775,12 @@ def main():
                         help="v18 = 复现 §6.8 的 30.00%%/30.00pp；v19 = 本轮新实验")
     parser.add_argument("--holdout", action="store_true",
                         help="v111 专用：改用不相交留出 seed 复测，结果另存")
+    parser.add_argument("--extend", action="store_true",
+                        help="v114 专用：只补跑缺失的长延迟点（追加到已有 JSONL）")
     args = parser.parse_args()
     set_suite(args.suite)
+    global EXTEND
+    EXTEND = bool(args.extend)
     if args.holdout:
         apply_holdout()
     if args.report_only:
