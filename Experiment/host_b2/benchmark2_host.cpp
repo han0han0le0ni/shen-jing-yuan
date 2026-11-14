@@ -81,6 +81,11 @@ struct B2Config {
     int readout_layer = 0;      /* v9：读出源层 0=hidden 1=input */
     int stride      = 10;       /* 导出采样间隔（tick） */
     int retarget    = 0;        /* v10：>0 时每 N tick 换一个新随机目标（仅采集用，保证状态覆盖） */
+
+    /* v11（T2h 结构改动，负责人签字）：直通/残差通路 */
+    int    direct_fan = 12;     /* I→M 每层扇出；12 = 旧拓扑 */
+    double hm_scale   = 1.0;    /* H→M 初始权重缩放；0 = 不建该通路（纯直通） */
+    double im_scale   = 1.0;    /* I→M 初始权重缩放（加扇出时保持总驱动） */
     int drive_direct = 0;       /* 1=用解析 ω* 直接驱动臂（评估链路对照） */
 };
 
@@ -198,6 +203,9 @@ int main(int argc, char* argv[]) {
                                            cfg.readout_layer = (m == "input") ? 1 : (m == "both") ? 2 : 0; }
         else if (a == "--stride")        next(cfg.stride);
         else if (a == "--retarget")      next(cfg.retarget);
+        else if (a == "--direct-fan")    next(cfg.direct_fan);
+        else if (a == "--hm-scale")      nextf(cfg.hm_scale);
+        else if (a == "--im-scale")      nextf(cfg.im_scale);
         else if (a == "--drive-direct")  cfg.drive_direct = 1;
         else if (a == "--prop-mode")     { std::string m = (i+1<argc) ? argv[++i] : ""; cfg.prop_mode = (m == "raw") ? 1 : 0; }
         else if (a == "--reward-mode")  { std::string m = (i+1<argc) ? argv[++i] : ""; cfg.reward_mode = (m == "potential") ? 1 : 0; }
@@ -234,7 +242,9 @@ int main(int argc, char* argv[]) {
                    "       [--hetero-tau F --hetero-thresh F --hetero-tune F  运动层异质化]\n"
                    "       [--preset m2 --budget N --prop-mode raw|full --avg-conn F]\n"
                    "       [--dump-hidden FILE [--dump-layer hidden|input] --stride N --retarget N]\n"
-                   "       [--load-readout FILE [--readout-layer hidden|input|both]] [--drive-direct]\n", argv[0]);
+                   "       [--load-readout FILE [--readout-layer hidden|input|both]] [--drive-direct]\n"
+                   "       [--direct-fan N   I→M 每层扇出，默认 12 = 旧拓扑（T2h 结构改动）]\n"
+                   "       [--hm-scale F     H→M 初始权重缩放，0 = 不建该通路（纯直通臂）]\n", argv[0]);
             return 0;
         }
     }
@@ -288,8 +298,9 @@ int main(int argc, char* argv[]) {
     
     /* 调制队列含 8192 个事件（v6 每条 6 个 double），放静态区避免大栈帧 */
     static NetworkState2 net;
-    if (net2_init(&net, cfg.input_n, cfg.hidden_n, cfg.motor1_n, cfg.motor2_n,
-                  cfg.avg_conn, cfg.seed) != 0) {
+    if (net2_init_ex(&net, cfg.input_n, cfg.hidden_n, cfg.motor1_n, cfg.motor2_n,
+                     cfg.avg_conn, cfg.seed, cfg.direct_fan, cfg.hm_scale,
+                     cfg.im_scale) != 0) {
         fprintf(stderr, "Init failed\n");
         return 1;
     }
@@ -397,6 +408,8 @@ int main(int argc, char* argv[]) {
                 net.input_count, (cfg.dump_layer == 1) ? "input" : "hidden",
                 (cfg.readout_layer == 2) ? "both" : (cfg.readout_layer == 1) ? "input" : "hidden");
         fprintf(mf, "  \"retarget\": %d, \"stride\": %d,\n", cfg.retarget, cfg.stride);
+        fprintf(mf, "  \"direct_fan\": %d, \"hm_scale\": %.4f, \"im_scale\": %.4f,\n",
+                cfg.direct_fan, cfg.hm_scale, cfg.im_scale);
         fprintf(mf, "  \"avg_conn\": %.4f, \"seed\": %u,\n", cfg.avg_conn, cfg.seed);
         fprintf(mf, "  \"episodes\": %d, \"score_horizon\": %d, \"max_ticks_per_ep\": %d,\n",
                 cfg.episodes, cfg.score_horizon, cfg.max_ticks_per_ep);

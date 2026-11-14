@@ -239,6 +239,14 @@ typedef struct {
 int  net2_init(NetworkState2* net, int input_n, int hidden_n,
                int motor1_n, int motor2_n, double avg_conn,
                unsigned int seed);
+/* v11（T2h 结构改动，负责人签字 2026-11-14）：
+ * direct_fan = 每个输入神经元直连到每个运动层的扇出（12 = 旧拓扑）；
+ * hm_scale   = HIDDEN→MOTOR 初始权重缩放，<=0 表示该通路不建（纯直通臂）；
+ * im_scale   = INPUT→MOTOR 初始权重缩放（用于在加扇出时保持总驱动不变）。
+ * net2_init(...) 等价于 net2_init_ex(..., 12, 1.0, 1.0)，旧路径逐位不变。 */
+int  net2_init_ex(NetworkState2* net, int input_n, int hidden_n,
+                  int motor1_n, int motor2_n, double avg_conn,
+                  unsigned int seed, int direct_fan, double hm_scale, double im_scale);
 void net2_destroy(NetworkState2* net);
 
 /* 真实规模查询：VIS/ctypes 调用者必须用这两个返回值分配缓冲区。

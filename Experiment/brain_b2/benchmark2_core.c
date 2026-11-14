@@ -139,9 +139,9 @@ double arm_reward(const ArmState* arm) {
 /* ============================================================
  * 网络初始化
  * ============================================================ */
-int net2_init(NetworkState2* net, int input_n, int hidden_n,
-              int motor1_n, int motor2_n, double avg_conn,
-              unsigned int seed) {
+int net2_init_ex(NetworkState2* net, int input_n, int hidden_n,
+                 int motor1_n, int motor2_n, double avg_conn,
+                 unsigned int seed, int direct_fan, double hm_scale, double im_scale) {
     /* 参数下界：避免 grid_side-1 / motor_n-1 的除零，以及空网络 */
     if (!net || input_n < 2 || hidden_n < 1 || motor1_n < 2 || motor2_n < 2
         || avg_conn < 1.0) return -1;
@@ -240,11 +240,14 @@ int net2_init(NetworkState2* net, int input_n, int hidden_n,
      * 并保留 ensure_synapse_capacity 作为兜底，任何估算偏差都不会越界。 */
     int K = (int)avg_conn;
     if (K < 3) K = 3;
+    /* v11（T2h 结构改动）：I→M 扇出可调；默认 12 时与旧容量估算逐位一致 */
+    int fan1 = direct_fan < 0 ? 0 : (direct_fan > motor1_n ? motor1_n : direct_fan);
+    int fan2 = direct_fan < 0 ? 0 : (direct_fan > motor2_n ? motor2_n : direct_fan);
     long long upper = (long long)net->input_count * 20
                     + (long long)hidden_n * (K / 2)
                     + (long long)hidden_n * K * 2
-                    + (long long)net->input_count * (motor1_n < 12 ? motor1_n : 12)
-                    + (long long)net->input_count * (motor2_n < 12 ? motor2_n : 12);
+                    + (long long)net->input_count * fan1
+                    + (long long)net->input_count * fan2;
     if (upper < 1 || upper > SYN_CAP_HARD_LIMIT) { free(net->neurons); return -1; }
     net->synapse_capacity = (int)upper + 64;
     net->synapses = (Synapse2*)calloc((size_t)net->synapse_capacity, sizeof(Synapse2));
@@ -308,7 +311,8 @@ int net2_init(NetworkState2* net, int input_n, int hidden_n,
     
     /* === 连接3: HIDDEN → MOTOR1（减弱！让 I→M 主导初期） === */
     int motor1_base = net->input_count + hidden_n;
-    for (i = 0; i < hidden_n; i++) {
+    /* v11（T2h）：hm_scale=0 → 整层不建（纯直通臂）；默认 1.0 时逐位不变 */
+    for (i = 0; hm_scale > 0.0 && i < hidden_n; i++) {
         int pre = net->input_count + i;
         for (int k = 0; k < K; k++) {
             int post = motor1_base + (int)(r_u() * motor1_n);
@@ -327,7 +331,7 @@ int net2_init(NetworkState2* net, int input_n, int hidden_n,
             s_idx = net->synapse_count++;
             net->synapses[s_idx].pre_id = pre;
             net->synapses[s_idx].post_id = post;
-            net->synapses[s_idx].weight = 0.3 + r_u() * 0.4;  /* 恢复 0.3-0.7 */
+            net->synapses[s_idx].weight = (0.3 + r_u() * 0.4) * hm_scale;  /* 0.3-0.7 */
             net->synapses[s_idx].eligibility_trace = 0.0;
             net->synapses[s_idx].last_stdp_tick = 0;
         }
@@ -335,7 +339,7 @@ int net2_init(NetworkState2* net, int input_n, int hidden_n,
     
     /* === 连接4: HIDDEN → MOTOR2 === */
     int motor2_base = motor1_base + motor1_n;
-    for (i = 0; i < hidden_n; i++) {
+    for (i = 0; hm_scale > 0.0 && i < hidden_n; i++) {
         int pre = net->input_count + i;
         for (int k = 0; k < K; k++) {
             int post = motor2_base + (int)(r_u() * motor2_n);
@@ -354,60 +358,102 @@ int net2_init(NetworkState2* net, int input_n, int hidden_n,
             s_idx = net->synapse_count++;
             net->synapses[s_idx].pre_id = pre;
             net->synapses[s_idx].post_id = post;
-            net->synapses[s_idx].weight = 0.3 + r_u() * 0.4;  /* 恢复 0.3-0.7 */
+            net->synapses[s_idx].weight = (0.3 + r_u() * 0.4) * hm_scale;  /* 0.3-0.7 */
             net->synapses[s_idx].eligibility_trace = 0.0;
             net->synapses[s_idx].last_stdp_tick = 0;
         }
     }
     
-    /* === 连接5: INPUT → MOTOR1（直接感知相对位置+本体感觉！绕过 hidden 层！）===
-     * 每个 INPUT 神经元连 motor1 层 K=4 个神经元，初始权重 1.5-2.5 */
+    /* === 连接5: INPUT → MOTOR1（直通/残差通路，绕过 hidden！）===
+     * v11（T2h 结构改动，负责人签字）：扇出由 direct_fan 决定，默认 12 = 旧拓扑逐位不变。
+     * 非 12 时用无放回抽样（O(fan)），避免全局去重扫描在大扇出下退化为 O(n²)。 */
+    int* pool = (int*)malloc((size_t)(motor1_n > motor2_n ? motor1_n : motor2_n) * sizeof(int));
+    if (!pool) { net2_destroy(net); return -1; }
     for (i = 0; i < net->input_count; i++) {
         int pre = i;
-        for (int k = 0; k < 12; k++) {
-            int post = motor1_base + (int)(r_u() * motor1_n);
-            if (post >= motor1_base + motor1_n) continue;
-            int dup = 0;
-            for (int s = 0; s < net->synapse_count; s++) {
-                if (net->synapses[s].pre_id == pre && net->synapses[s].post_id == post) { dup = 1; break; }
+        if (fan1 == 12) {
+            for (int k = 0; k < 12; k++) {
+                int post = motor1_base + (int)(r_u() * motor1_n);
+                if (post >= motor1_base + motor1_n) continue;
+                int dup = 0;
+                for (int s = 0; s < net->synapse_count; s++) {
+                    if (net->synapses[s].pre_id == pre && net->synapses[s].post_id == post) { dup = 1; break; }
+                }
+                if (dup) continue;
+                if (ensure_synapse_capacity(net, net->synapse_count + 1) != 0) {
+                    free(pool); net2_destroy(net);
+                    return -1;
+                }
+                s_idx = net->synapse_count++;
+                net->synapses[s_idx].pre_id = pre;
+                net->synapses[s_idx].post_id = post;
+                net->synapses[s_idx].weight = (1.5 + r_u() * 1.0) * im_scale;  /* 1.5-2.5, mean 2.0 — 恢复 */
+                net->synapses[s_idx].eligibility_trace = 0.0;
+                net->synapses[s_idx].last_stdp_tick = 0;
             }
-            if (dup) continue;
-            if (ensure_synapse_capacity(net, net->synapse_count + 1) != 0) {
-                net2_destroy(net);
-                return -1;
+        } else {
+            for (int j = 0; j < motor1_n; j++) pool[j] = j;
+            for (int k = 0; k < fan1; k++) {
+                int j = k + (int)(r_u() * (double)(motor1_n - k));
+                if (j >= motor1_n) j = motor1_n - 1;
+                int t = pool[k]; pool[k] = pool[j]; pool[j] = t;
+                if (ensure_synapse_capacity(net, net->synapse_count + 1) != 0) {
+                    free(pool); net2_destroy(net);
+                    return -1;
+                }
+                s_idx = net->synapse_count++;
+                net->synapses[s_idx].pre_id = pre;
+                net->synapses[s_idx].post_id = motor1_base + pool[k];
+                net->synapses[s_idx].weight = (1.5 + r_u() * 1.0) * im_scale;
+                net->synapses[s_idx].eligibility_trace = 0.0;
+                net->synapses[s_idx].last_stdp_tick = 0;
             }
-            s_idx = net->synapse_count++;
-            net->synapses[s_idx].pre_id = pre;
-            net->synapses[s_idx].post_id = post;
-            net->synapses[s_idx].weight = 1.5 + r_u() * 1.0;  /* 1.5-2.5, mean 2.0 — 恢复 */
-            net->synapses[s_idx].eligibility_trace = 0.0;
-            net->synapses[s_idx].last_stdp_tick = 0;
         }
     }
     
-    /* === 连接6: INPUT → MOTOR2（直接感知相对位置+本体感觉！）=== */
+    /* === 连接6: INPUT → MOTOR2（同上）=== */
     for (i = 0; i < net->input_count; i++) {
         int pre = i;
-        for (int k = 0; k < 12; k++) {
-            int post = motor2_base + (int)(r_u() * motor2_n);
-            if (post >= motor2_base + motor2_n) continue;
-            int dup = 0;
-            for (int s = 0; s < net->synapse_count; s++) {
-                if (net->synapses[s].pre_id == pre && net->synapses[s].post_id == post) { dup = 1; break; }
+        if (fan2 == 12) {
+            for (int k = 0; k < 12; k++) {
+                int post = motor2_base + (int)(r_u() * motor2_n);
+                if (post >= motor2_base + motor2_n) continue;
+                int dup = 0;
+                for (int s = 0; s < net->synapse_count; s++) {
+                    if (net->synapses[s].pre_id == pre && net->synapses[s].post_id == post) { dup = 1; break; }
+                }
+                if (dup) continue;
+                if (ensure_synapse_capacity(net, net->synapse_count + 1) != 0) {
+                    free(pool); net2_destroy(net);
+                    return -1;
+                }
+                s_idx = net->synapse_count++;
+                net->synapses[s_idx].pre_id = pre;
+                net->synapses[s_idx].post_id = post;
+                net->synapses[s_idx].weight = (1.5 + r_u() * 1.0) * im_scale;  /* 1.5-2.5, mean 2.0 */
+                net->synapses[s_idx].eligibility_trace = 0.0;
+                net->synapses[s_idx].last_stdp_tick = 0;
             }
-            if (dup) continue;
-            if (ensure_synapse_capacity(net, net->synapse_count + 1) != 0) {
-                net2_destroy(net);
-                return -1;
+        } else {
+            for (int j = 0; j < motor2_n; j++) pool[j] = j;
+            for (int k = 0; k < fan2; k++) {
+                int j = k + (int)(r_u() * (double)(motor2_n - k));
+                if (j >= motor2_n) j = motor2_n - 1;
+                int t = pool[k]; pool[k] = pool[j]; pool[j] = t;
+                if (ensure_synapse_capacity(net, net->synapse_count + 1) != 0) {
+                    free(pool); net2_destroy(net);
+                    return -1;
+                }
+                s_idx = net->synapse_count++;
+                net->synapses[s_idx].pre_id = pre;
+                net->synapses[s_idx].post_id = motor2_base + pool[k];
+                net->synapses[s_idx].weight = (1.5 + r_u() * 1.0) * im_scale;
+                net->synapses[s_idx].eligibility_trace = 0.0;
+                net->synapses[s_idx].last_stdp_tick = 0;
             }
-            s_idx = net->synapse_count++;
-            net->synapses[s_idx].pre_id = pre;
-            net->synapses[s_idx].post_id = post;
-            net->synapses[s_idx].weight = 1.5 + r_u() * 1.0;  /* 1.5-2.5, mean 2.0 */
-            net->synapses[s_idx].eligibility_trace = 0.0;
-            net->synapses[s_idx].last_stdp_tick = 0;
         }
     }
+    free(pool);
     
     /* 超参数：防止 trace 瞬间饱和 */
     net->hp.tau_stdp = 50.0;
@@ -468,6 +514,14 @@ int net2_init(NetworkState2* net, int input_n, int hidden_n,
     net->current_tick = 0;
     
     return 0;
+}
+
+/* 兼容入口：旧拓扑（I→M 扇出 12、H→M 满权重），与 v10 及以前逐位一致 */
+int net2_init(NetworkState2* net, int input_n, int hidden_n,
+              int motor1_n, int motor2_n, double avg_conn,
+              unsigned int seed) {
+    return net2_init_ex(net, input_n, hidden_n, motor1_n, motor2_n,
+                        avg_conn, seed, 12, 1.0, 1.0);
 }
 
 void net2_destroy(NetworkState2* net) {
