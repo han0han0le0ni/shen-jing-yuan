@@ -194,7 +194,8 @@ int main(int argc, char* argv[]) {
         else if (a == "--dump-hidden")   { if (i+1<argc) cfg.dump_hidden = argv[++i]; }
         else if (a == "--load-readout")  { if (i+1<argc) cfg.load_readout = argv[++i]; }
         else if (a == "--dump-layer")    { std::string m = (i+1<argc) ? argv[++i] : ""; cfg.dump_layer = (m == "input") ? 1 : 0; }
-        else if (a == "--readout-layer") { std::string m = (i+1<argc) ? argv[++i] : ""; cfg.readout_layer = (m == "input") ? 1 : 0; }
+        else if (a == "--readout-layer") { std::string m = (i+1<argc) ? argv[++i] : "";
+                                           cfg.readout_layer = (m == "input") ? 1 : (m == "both") ? 2 : 0; }
         else if (a == "--stride")        next(cfg.stride);
         else if (a == "--retarget")      next(cfg.retarget);
         else if (a == "--drive-direct")  cfg.drive_direct = 1;
@@ -233,7 +234,7 @@ int main(int argc, char* argv[]) {
                    "       [--hetero-tau F --hetero-thresh F --hetero-tune F  运动层异质化]\n"
                    "       [--preset m2 --budget N --prop-mode raw|full --avg-conn F]\n"
                    "       [--dump-hidden FILE [--dump-layer hidden|input] --stride N --retarget N]\n"
-                   "       [--load-readout FILE [--readout-layer hidden|input]] [--drive-direct]\n", argv[0]);
+                   "       [--load-readout FILE [--readout-layer hidden|input|both]] [--drive-direct]\n", argv[0]);
             return 0;
         }
     }
@@ -341,7 +342,8 @@ int main(int argc, char* argv[]) {
 
     /* v8（T2 上界实验）：外部线性读出 / 链路对照 / hidden 发放导出 */
     if (!cfg.load_readout.empty()) {
-        const int src_cnt = (cfg.readout_layer == 1) ? net.input_count : net.hidden_count;
+        const int src_cnt = (cfg.readout_layer == 2) ? (net.input_count + net.hidden_count)
+                          : (cfg.readout_layer == 1) ? net.input_count : net.hidden_count;
         size_t want = (size_t)src_cnt * 2;
         FILE* rf = fopen(cfg.load_readout.c_str(), "rb");
         if (!rf) { fprintf(stderr, "Cannot open %s\n", cfg.load_readout.c_str()); net2_destroy(&net); return 1; }
@@ -355,8 +357,8 @@ int main(int argc, char* argv[]) {
         net2_set_ext_readout_src(&net, beta, cfg.readout_layer);
         free(beta);
         net.use_reward_modulation = 0;
-        printf("Ext readout: %zu coeffs loaded (layer=%s), learning OFF\n",
-               want, (cfg.readout_layer == 1) ? "input" : "hidden");
+        printf("Ext readout: %zu coeffs loaded (layer=%s), learning OFF\n", want,
+               (cfg.readout_layer == 2) ? "both" : (cfg.readout_layer == 1) ? "input" : "hidden");
     }
     if (cfg.drive_direct) {
         net2_set_drive_mode(&net, 1);
@@ -393,7 +395,7 @@ int main(int argc, char* argv[]) {
                 cfg.input_n, cfg.hidden_n, cfg.motor1_n, cfg.motor2_n);
         fprintf(mf, "  \"input_count\": %d, \"dump_layer\": \"%s\", \"readout_layer\": \"%s\",\n",
                 net.input_count, (cfg.dump_layer == 1) ? "input" : "hidden",
-                (cfg.readout_layer == 1) ? "input" : "hidden");
+                (cfg.readout_layer == 2) ? "both" : (cfg.readout_layer == 1) ? "input" : "hidden");
         fprintf(mf, "  \"retarget\": %d, \"stride\": %d,\n", cfg.retarget, cfg.stride);
         fprintf(mf, "  \"avg_conn\": %.4f, \"seed\": %u,\n", cfg.avg_conn, cfg.seed);
         fprintf(mf, "  \"episodes\": %d, \"score_horizon\": %d, \"max_ticks_per_ep\": %d,\n",

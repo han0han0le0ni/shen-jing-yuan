@@ -223,7 +223,8 @@ typedef struct {
      * ω = Σ_hidden s_i·β_i（不做任何权重修改，纯读）。 */
     double* ext_beta;
     int ext_on;
-    /* v9（T2c）：外部读出的源层。0=hidden（默认，旧行为），1=input。
+    /* v9（T2c）：外部读出的源层。0=hidden（默认，旧行为），1=input，2=input⊕hidden（拼接）。
+     * 神经元数组里 input 段与 hidden 段相邻，故 2 可连续读。
      * ext_beta 长度恒为 2*src_count（前一半 joint1，后一半 joint2）。 */
     int ext_src;
     /* 0 = 正常解码；1 = 直接用解析 ω*（cf_omega*）驱动臂，仅作评估链路对照。 */

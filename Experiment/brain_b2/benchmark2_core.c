@@ -483,8 +483,9 @@ void net2_destroy(NetworkState2* net) {
  * 前一半是 joint1 的系数、后一半是 joint2 的。只读叠加，不改权重与学习。 */
 int net2_set_ext_readout_src(NetworkState2* net, const double* beta, int src) {
     if (!net || !beta) return -1;
-    if (src != 0 && src != 1) return -1;
-    int cnt = (src == 1) ? net->input_count : net->hidden_count;
+    if (src != 0 && src != 1 && src != 2) return -1;
+    int cnt = (src == 2) ? (net->input_count + net->hidden_count)
+            : (src == 1) ? net->input_count : net->hidden_count;
     if (cnt <= 0) return -1;
     size_t n = (size_t)cnt * 2;
     double* buf = (double*)malloc(n * sizeof(double));
@@ -865,10 +866,11 @@ void net2_tick(NetworkState2* net) {
     double omega1_cmd = 0.0, omega2_cmd = 0.0;
     if (net->ext_on && net->ext_beta) {
         /* v8 T2 上界：外部线性读出 ω = Σ s_i·β_i（不碰权重、不碰学习）
-         * v9 T2c：源层可选（ext_src=0 hidden / 1 input），base/cnt 随之切换。 */
-        const int src_input = (net->ext_src == 1);
+         * v9 T2c：源层可选（0=hidden / 1=input / 2=input⊕hidden），base/cnt 随之切换。 */
+        const int src_input = (net->ext_src == 1 || net->ext_src == 2);
         const int base = src_input ? 0 : net->input_count;
-        const int cnt  = src_input ? net->input_count : net->hidden_count;
+        const int cnt  = (net->ext_src == 2) ? (net->input_count + net->hidden_count)
+                       : (net->ext_src == 1) ? net->input_count : net->hidden_count;
         double s1 = 0.0, s2 = 0.0;
         for (int hi = 0; hi < cnt; hi++) {
             if (!net->neurons[base + hi].is_spiking) continue;
