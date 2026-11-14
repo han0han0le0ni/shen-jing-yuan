@@ -99,3 +99,7 @@ Experiment/data/b1_taun/
 Experiment/data/b1_sparse/
 Experiment/data/b1_ref/
 Experiment/data/b1_nm_align/
+
+# neuromod 参考实现对照（可复现：tools/nm_synapse_compare.py；crate 构建产物不入库）
+Experiment/data/b1_nm_syn/
+Experiment/ref_neuromod/target/
