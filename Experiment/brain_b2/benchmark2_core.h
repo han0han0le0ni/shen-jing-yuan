@@ -229,6 +229,13 @@ typedef struct {
     int ext_src;
     /* 0 = 正常解码；1 = 直接用解析 ω*（cf_omega*）驱动臂，仅作评估链路对照。 */
     int drive_mode;
+
+    /* v12（T2j 时序/速率编码）：每神经元指数滑动发放率迹。
+     * rate_tau<=0 时不分配、不更新、读出仍用瞬时 0/1 → 旧路径逐位不变。
+     * ext_rate=1 时外部线性读出改用 rate[]（速率码）而不是 is_spiking。 */
+    double* rate;
+    double  rate_tau;
+    int     ext_rate;
 } NetworkState2;
 
 /* ============================================================
@@ -283,6 +290,9 @@ int  net2_set_ext_readout(NetworkState2* net, const double* beta);
  * src=0 → hidden（等价于 net2_set_ext_readout），src=1 → input（input_count 维）。 */
 int  net2_set_ext_readout_src(NetworkState2* net, const double* beta, int src);
 void net2_set_drive_mode(NetworkState2* net, int mode);
+/* v12（T2j）：速率迹开关（tau<=0 关闭并释放缓冲）与「外部读出用速率」开关。 */
+void net2_set_rate_trace(NetworkState2* net, double tau);
+void net2_set_ext_rate(NetworkState2* net, int on);
 
 /* 物理步进（宿主可选手动控制） */
 void arm_step(ArmState* arm, double omega1_cmd, double omega2_cmd);

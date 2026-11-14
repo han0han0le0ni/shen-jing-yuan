@@ -484,6 +484,10 @@ int net2_init_ex(NetworkState2* net, int input_n, int hidden_n,
     net->ext_on     = 0;
     net->ext_src    = 0;   /* v9：默认 hidden，旧路径逐位不变 */
     net->drive_mode = 0;
+    /* v12（T2j）：速率迹默认关闭 */
+    net->rate       = NULL;
+    net->rate_tau   = 0.0;
+    net->ext_rate   = 0;
 
     #if ELIGIBILITY_TRACE_ENABLE
     net->use_eligibility_trace = 1;
@@ -530,6 +534,7 @@ void net2_destroy(NetworkState2* net) {
     if (net->synapses) free(net->synapses);
     if (net->reward_history) free(net->reward_history);
     if (net->ext_beta) free(net->ext_beta);
+    if (net->rate) free(net->rate);
     memset(net, 0, sizeof(NetworkState2));
 }
 
@@ -554,6 +559,27 @@ int net2_set_ext_readout_src(NetworkState2* net, const double* beta, int src) {
 
 int net2_set_ext_readout(NetworkState2* net, const double* beta) {
     return net2_set_ext_readout_src(net, beta, 0);
+}
+
+/* v12（T2j 时序/速率编码）：速率迹。tau<=0 关闭（释放缓冲，回到瞬时 0/1 路径）。 */
+void net2_set_rate_trace(NetworkState2* net, double tau) {
+    if (!net) return;
+    if (tau <= 0.0) {
+        if (net->rate) { free(net->rate); net->rate = NULL; }
+        net->rate_tau = 0.0;
+        net->ext_rate = 0;
+        return;
+    }
+    if (!net->rate) {
+        net->rate = (double*)calloc((size_t)net->neuron_count, sizeof(double));
+        if (!net->rate) return;
+    }
+    net->rate_tau = tau;
+}
+
+void net2_set_ext_rate(NetworkState2* net, int on) {
+    if (!net) return;
+    net->ext_rate = (on == 1 && net->rate && net->rate_tau > 0.0) ? 1 : 0;
 }
 
 void net2_set_drive_mode(NetworkState2* net, int mode) {
@@ -866,6 +892,15 @@ void net2_tick(NetworkState2* net) {
         n->membrane_potential = MEMBRANE_REST;
     }
     
+    /* v12（T2j）：速率迹更新（指数滑动平均发放率）；rate_tau<=0 时整段跳过 */
+    if (net->rate_tau > 0.0 && net->rate) {
+        const double a_rate = 1.0 / net->rate_tau;
+        for (i = 0; i < net->neuron_count; i++) {
+            double s = net->neurons[i].is_spiking ? 1.0 : 0.0;
+            net->rate[i] += a_rate * (s - net->rate[i]);
+        }
+    }
+    
     /* Step 3: 资格迹更新（事件驱动） */
     for (s = 0; s < net->synapse_count; s++) {
         Neuron2* pre = &net->neurons[net->synapses[s].pre_id];
@@ -927,9 +962,16 @@ void net2_tick(NetworkState2* net) {
                        : (net->ext_src == 1) ? net->input_count : net->hidden_count;
         double s1 = 0.0, s2 = 0.0;
         for (int hi = 0; hi < cnt; hi++) {
-            if (!net->neurons[base + hi].is_spiking) continue;
-            s1 += net->ext_beta[hi];
-            s2 += net->ext_beta[cnt + hi];
+            double val;
+            if (net->ext_rate && net->rate) {
+                val = net->rate[base + hi];
+            } else {
+                if (!net->neurons[base + hi].is_spiking) continue;
+                val = 1.0;
+            }
+            if (val == 0.0) continue;
+            s1 += val * net->ext_beta[hi];
+            s2 += val * net->ext_beta[cnt + hi];
         }
         omega1_cmd = s1;
         omega2_cmd = s2;

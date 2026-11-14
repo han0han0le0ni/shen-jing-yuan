@@ -86,6 +86,11 @@ struct B2Config {
     int    direct_fan = 12;     /* I→M 每层扇出；12 = 旧拓扑 */
     double hm_scale   = 1.0;    /* H→M 初始权重缩放；0 = 不建该通路（纯直通） */
     double im_scale   = 1.0;    /* I→M 初始权重缩放（加扇出时保持总驱动） */
+
+    /* v12（T2j 时序/速率编码） */
+    double rate_tau      = 0.0;  /* >0 开启每神经元速率迹（EMA 发放率） */
+    int    dump_values   = 0;    /* 0=瞬时 0/1；1=速率（uint8 量化 ×255） */
+    int    readout_values = 0;   /* 0=瞬时 0/1；1=速率迹 */
     int drive_direct = 0;       /* 1=用解析 ω* 直接驱动臂（评估链路对照） */
 };
 
@@ -206,6 +211,9 @@ int main(int argc, char* argv[]) {
         else if (a == "--direct-fan")    next(cfg.direct_fan);
         else if (a == "--hm-scale")      nextf(cfg.hm_scale);
         else if (a == "--im-scale")      nextf(cfg.im_scale);
+        else if (a == "--rate-tau")      nextf(cfg.rate_tau);
+        else if (a == "--dump-values")   { std::string m = (i+1<argc) ? argv[++i] : ""; cfg.dump_values = (m == "rate") ? 1 : 0; }
+        else if (a == "--readout-values"){ std::string m = (i+1<argc) ? argv[++i] : ""; cfg.readout_values = (m == "rate") ? 1 : 0; }
         else if (a == "--drive-direct")  cfg.drive_direct = 1;
         else if (a == "--prop-mode")     { std::string m = (i+1<argc) ? argv[++i] : ""; cfg.prop_mode = (m == "raw") ? 1 : 0; }
         else if (a == "--reward-mode")  { std::string m = (i+1<argc) ? argv[++i] : ""; cfg.reward_mode = (m == "potential") ? 1 : 0; }
@@ -244,7 +252,8 @@ int main(int argc, char* argv[]) {
                    "       [--dump-hidden FILE [--dump-layer hidden|input] --stride N --retarget N]\n"
                    "       [--load-readout FILE [--readout-layer hidden|input|both]] [--drive-direct]\n"
                    "       [--direct-fan N   I→M 每层扇出，默认 12 = 旧拓扑（T2h 结构改动）]\n"
-                   "       [--hm-scale F     H→M 初始权重缩放，0 = 不建该通路（纯直通臂）]\n", argv[0]);
+                   "       [--hm-scale F     H→M 初始权重缩放，0 = 不建该通路（纯直通臂）]\n"
+                   "       [--rate-tau F     速率迹时间常数（tick，0=关）；配 --dump-values rate / --readout-values rate]\n", argv[0]);
             return 0;
         }
     }
@@ -304,6 +313,10 @@ int main(int argc, char* argv[]) {
         fprintf(stderr, "Init failed\n");
         return 1;
     }
+    /* v12（T2j）：速率迹必须先于外部读出开关设置（setter 依赖缓冲已分配） */
+    if (cfg.rate_tau > 0.0) net2_set_rate_trace(&net, cfg.rate_tau);
+    if (cfg.rate_tau > 0.0 && cfg.readout_values == 1) net2_set_ext_rate(&net, 1);
+
     /* 把 CLI/预设参数写入运行时超参（net2_init 里是旧版默认值） */
     net.hp.psp_factor = cfg.psp_factor;
     net.hp.trace_clamp = cfg.trace_clamp;
@@ -410,6 +423,9 @@ int main(int argc, char* argv[]) {
         fprintf(mf, "  \"retarget\": %d, \"stride\": %d,\n", cfg.retarget, cfg.stride);
         fprintf(mf, "  \"direct_fan\": %d, \"hm_scale\": %.4f, \"im_scale\": %.4f,\n",
                 cfg.direct_fan, cfg.hm_scale, cfg.im_scale);
+        fprintf(mf, "  \"rate_tau\": %.2f, \"dump_values\": \"%s\", \"readout_values\": \"%s\",\n",
+                cfg.rate_tau, cfg.dump_values ? "rate" : "spike",
+                (cfg.readout_values && cfg.rate_tau > 0.0) ? "rate" : "spike");
         fprintf(mf, "  \"avg_conn\": %.4f, \"seed\": %u,\n", cfg.avg_conn, cfg.seed);
         fprintf(mf, "  \"episodes\": %d, \"score_horizon\": %d, \"max_ticks_per_ep\": %d,\n",
                 cfg.episodes, cfg.score_horizon, cfg.max_ticks_per_ep);
@@ -564,7 +580,15 @@ int main(int argc, char* argv[]) {
             if (dh && (t % cfg.stride == 0)) {
                 unsigned char bit;
                 for (int hi = 0; hi < dump_width; hi++) {
-                    bit = (unsigned char)(net.neurons[dump_base + hi].is_spiking ? 1 : 0);
+                    if (cfg.dump_values == 1) {
+                        double rv = (net.rate ? net.rate[dump_base + hi] : 0.0);
+                        int q = (int)(rv * 255.0 + 0.5);
+                        if (q < 0) q = 0;
+                        if (q > 255) q = 255;
+                        bit = (unsigned char)q;
+                    } else {
+                        bit = (unsigned char)(net.neurons[dump_base + hi].is_spiking ? 1 : 0);
+                    }
                     fwrite(&bit, 1, 1, dh);
                 }
                 double meta[8] = { (double)t, net.cf_omega1_star, net.cf_omega2_star,
