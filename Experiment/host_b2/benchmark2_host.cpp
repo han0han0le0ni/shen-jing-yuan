@@ -77,7 +77,10 @@ struct B2Config {
     /* v8（T2 解码可学性上界）：hidden 发放导出 / 外部线性读出 / 链路对照 */
     std::string dump_hidden;    /* 非空：按 stride 导出 hidden 发放到该二进制文件 */
     std::string load_readout;   /* 非空：读取 2*hidden 个 double 作为外部线性读出 */
+    int dump_layer    = 0;      /* v9：导出源层 0=hidden 1=input */
+    int readout_layer = 0;      /* v9：读出源层 0=hidden 1=input */
     int stride      = 10;       /* 导出采样间隔（tick） */
+    int retarget    = 0;        /* v10：>0 时每 N tick 换一个新随机目标（仅采集用，保证状态覆盖） */
     int drive_direct = 0;       /* 1=用解析 ω* 直接驱动臂（评估链路对照） */
 };
 
@@ -190,7 +193,10 @@ int main(int argc, char* argv[]) {
         else if (a == "--avg-conn")      nextf(cfg.avg_conn);
         else if (a == "--dump-hidden")   { if (i+1<argc) cfg.dump_hidden = argv[++i]; }
         else if (a == "--load-readout")  { if (i+1<argc) cfg.load_readout = argv[++i]; }
+        else if (a == "--dump-layer")    { std::string m = (i+1<argc) ? argv[++i] : ""; cfg.dump_layer = (m == "input") ? 1 : 0; }
+        else if (a == "--readout-layer") { std::string m = (i+1<argc) ? argv[++i] : ""; cfg.readout_layer = (m == "input") ? 1 : 0; }
         else if (a == "--stride")        next(cfg.stride);
+        else if (a == "--retarget")      next(cfg.retarget);
         else if (a == "--drive-direct")  cfg.drive_direct = 1;
         else if (a == "--prop-mode")     { std::string m = (i+1<argc) ? argv[++i] : ""; cfg.prop_mode = (m == "raw") ? 1 : 0; }
         else if (a == "--reward-mode")  { std::string m = (i+1<argc) ? argv[++i] : ""; cfg.reward_mode = (m == "potential") ? 1 : 0; }
@@ -224,7 +230,10 @@ int main(int argc, char* argv[]) {
                    "       [--error-gain F  攀爬纤维：关节级有符号运动误差增益(默认0=关)]\n"
                    "       [--novelty-gain F 乙酰胆碱：惊讶度放大学习率(默认0=关)]\n"
                    "       [--cf-lambda F    逆运动学期望速度缩放(默认1.0)]\n"
-                   "       [--hetero-tau F --hetero-thresh F --hetero-tune F  运动层异质化]\n", argv[0]);
+                   "       [--hetero-tau F --hetero-thresh F --hetero-tune F  运动层异质化]\n"
+                   "       [--preset m2 --budget N --prop-mode raw|full --avg-conn F]\n"
+                   "       [--dump-hidden FILE [--dump-layer hidden|input] --stride N --retarget N]\n"
+                   "       [--load-readout FILE [--readout-layer hidden|input]] [--drive-direct]\n", argv[0]);
             return 0;
         }
     }
@@ -332,7 +341,8 @@ int main(int argc, char* argv[]) {
 
     /* v8（T2 上界实验）：外部线性读出 / 链路对照 / hidden 发放导出 */
     if (!cfg.load_readout.empty()) {
-        size_t want = (size_t)net.hidden_count * 2;
+        const int src_cnt = (cfg.readout_layer == 1) ? net.input_count : net.hidden_count;
+        size_t want = (size_t)src_cnt * 2;
         FILE* rf = fopen(cfg.load_readout.c_str(), "rb");
         if (!rf) { fprintf(stderr, "Cannot open %s\n", cfg.load_readout.c_str()); net2_destroy(&net); return 1; }
         double* beta = (double*)malloc(want * sizeof(double));
@@ -342,10 +352,11 @@ int main(int argc, char* argv[]) {
             fprintf(stderr, "readout size mismatch: got %zu want %zu\n", got, want);
             free(beta); net2_destroy(&net); return 1;
         }
-        net2_set_ext_readout(&net, beta);
+        net2_set_ext_readout_src(&net, beta, cfg.readout_layer);
         free(beta);
         net.use_reward_modulation = 0;
-        printf("Ext readout: %zu coeffs loaded, learning OFF\n", want);
+        printf("Ext readout: %zu coeffs loaded (layer=%s), learning OFF\n",
+               want, (cfg.readout_layer == 1) ? "input" : "hidden");
     }
     if (cfg.drive_direct) {
         net2_set_drive_mode(&net, 1);
@@ -353,10 +364,12 @@ int main(int argc, char* argv[]) {
         printf("Drive: direct omega* (link check), learning OFF\n");
     }
     FILE* dh = NULL;
+    const int dump_base  = (cfg.dump_layer == 1) ? 0 : net.input_count;
+    const int dump_width = (cfg.dump_layer == 1) ? net.input_count : net.hidden_count;
     if (!cfg.dump_hidden.empty()) {
         dh = fopen(cfg.dump_hidden.c_str(), "wb");
         if (!dh) { fprintf(stderr, "Cannot open %s\n", cfg.dump_hidden.c_str()); net2_destroy(&net); return 1; }
-        int hdr[3] = { 0x42325432, net.hidden_count, cfg.stride };
+        int hdr[3] = { 0x42325432, dump_width, cfg.stride };
         fwrite(hdr, sizeof(int), 3, dh);
     }
     
@@ -378,6 +391,10 @@ int main(int argc, char* argv[]) {
         fprintf(mf, "  \"out_csv\": \"%s\",\n", out_j.c_str());
         fprintf(mf, "  \"input\": %d, \"hidden\": %d, \"motor1\": %d, \"motor2\": %d,\n",
                 cfg.input_n, cfg.hidden_n, cfg.motor1_n, cfg.motor2_n);
+        fprintf(mf, "  \"input_count\": %d, \"dump_layer\": \"%s\", \"readout_layer\": \"%s\",\n",
+                net.input_count, (cfg.dump_layer == 1) ? "input" : "hidden",
+                (cfg.readout_layer == 1) ? "input" : "hidden");
+        fprintf(mf, "  \"retarget\": %d, \"stride\": %d,\n", cfg.retarget, cfg.stride);
         fprintf(mf, "  \"avg_conn\": %.4f, \"seed\": %u,\n", cfg.avg_conn, cfg.seed);
         fprintf(mf, "  \"episodes\": %d, \"score_horizon\": %d, \"max_ticks_per_ep\": %d,\n",
                 cfg.episodes, cfg.score_horizon, cfg.max_ticks_per_ep);
@@ -472,6 +489,14 @@ int main(int argc, char* argv[]) {
         int ep_limit = (cfg.budget > 0) ? cfg.budget
                                        : (cfg.speed_mode ? cfg.max_ticks_per_ep : cfg.score_horizon);
         for (int t = 0; ep_limit <= 0 || t < ep_limit; t++) {
+            /* v10（T2e 采集）：每 retarget tick 换一个新随机目标，避免手臂到点后长期停住
+             * 造成「绝大多数样本 ω*≈0」的退化分布。仅影响采集，不影响评估口径。 */
+            if (cfg.retarget > 0 && t > 0 && (t % cfg.retarget == 0)) {
+                double ntx = tx, nty = ty;
+                gen_target(cfg, ep * 100000 + t, &ntx, &nty);
+                tx = ntx; ty = nty;
+                net2_set_target(&net, tx, ty);
+            }
             net2_tick(&net);
             
             double cur_ex = net.arm.end_x, cur_ey = net.arm.end_y;
@@ -520,12 +545,11 @@ int main(int argc, char* argv[]) {
             net2_inject_reward(&net, r, 0);
             ticks_used = t + 1;
 
-            /* v8：hidden 发放导出（T2 上界实验的数据采集） */
+            /* v8：hidden 发放导出（T2 上界实验的数据采集）；v9：可切 input 层 */
             if (dh && (t % cfg.stride == 0)) {
-                const int hbase = net.input_count;
                 unsigned char bit;
-                for (int hi = 0; hi < net.hidden_count; hi++) {
-                    bit = (unsigned char)(net.neurons[hbase + hi].is_spiking ? 1 : 0);
+                for (int hi = 0; hi < dump_width; hi++) {
+                    bit = (unsigned char)(net.neurons[dump_base + hi].is_spiking ? 1 : 0);
                     fwrite(&bit, 1, 1, dh);
                 }
                 double meta[8] = { (double)t, net.cf_omega1_star, net.cf_omega2_star,

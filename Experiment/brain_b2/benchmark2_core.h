@@ -223,6 +223,9 @@ typedef struct {
      * ω = Σ_hidden s_i·β_i（不做任何权重修改，纯读）。 */
     double* ext_beta;
     int ext_on;
+    /* v9（T2c）：外部读出的源层。0=hidden（默认，旧行为），1=input。
+     * ext_beta 长度恒为 2*src_count（前一半 joint1，后一半 joint2）。 */
+    int ext_src;
     /* 0 = 正常解码；1 = 直接用解析 ω*（cf_omega*）驱动臂，仅作评估链路对照。 */
     int drive_mode;
 } NetworkState2;
@@ -267,6 +270,9 @@ void net2_get_cf_error(const NetworkState2* net, double* out4);
  *   返回 0 成功。-1 = 参数非法（net 为空 / beta 为空）。
  * net2_set_drive_mode：0=正常解码，1=用解析 ω* 直接驱动（评估链路对照）。 */
 int  net2_set_ext_readout(NetworkState2* net, const double* beta);
+/* v9（T2c，不改判据状态）：同上，但显式指定源层。
+ * src=0 → hidden（等价于 net2_set_ext_readout），src=1 → input（input_count 维）。 */
+int  net2_set_ext_readout_src(NetworkState2* net, const double* beta, int src);
 void net2_set_drive_mode(NetworkState2* net, int mode);
 
 /* 物理步进（宿主可选手动控制） */

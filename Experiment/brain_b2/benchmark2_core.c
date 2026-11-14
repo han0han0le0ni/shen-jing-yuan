@@ -436,6 +436,7 @@ int net2_init(NetworkState2* net, int input_n, int hidden_n,
     /* v8：T2 上界实验的外部读出（默认关闭，旧路径逐位不变） */
     net->ext_beta   = NULL;
     net->ext_on     = 0;
+    net->ext_src    = 0;   /* v9：默认 hidden，旧路径逐位不变 */
     net->drive_mode = 0;
 
     #if ELIGIBILITY_TRACE_ENABLE
@@ -480,17 +481,24 @@ void net2_destroy(NetworkState2* net) {
 
 /* v8（T2 上界实验）：外部线性读出。beta 长度 2*hidden_count，
  * 前一半是 joint1 的系数、后一半是 joint2 的。只读叠加，不改权重与学习。 */
-int net2_set_ext_readout(NetworkState2* net, const double* beta) {
+int net2_set_ext_readout_src(NetworkState2* net, const double* beta, int src) {
     if (!net || !beta) return -1;
-    if (net->hidden_count <= 0) return -1;
-    size_t n = (size_t)net->hidden_count * 2;
+    if (src != 0 && src != 1) return -1;
+    int cnt = (src == 1) ? net->input_count : net->hidden_count;
+    if (cnt <= 0) return -1;
+    size_t n = (size_t)cnt * 2;
     double* buf = (double*)malloc(n * sizeof(double));
     if (!buf) return -1;
     memcpy(buf, beta, n * sizeof(double));
     if (net->ext_beta) free(net->ext_beta);
     net->ext_beta = buf;
+    net->ext_src = src;
     net->ext_on = 1;
     return 0;
+}
+
+int net2_set_ext_readout(NetworkState2* net, const double* beta) {
+    return net2_set_ext_readout_src(net, beta, 0);
 }
 
 void net2_set_drive_mode(NetworkState2* net, int mode) {
@@ -856,13 +864,16 @@ void net2_tick(NetworkState2* net) {
      * STDP 是 spike-based，解码也用 spike-based 方式，信号匹配 */
     double omega1_cmd = 0.0, omega2_cmd = 0.0;
     if (net->ext_on && net->ext_beta) {
-        /* v8 T2 上界：外部线性读出 ω = Σ_hidden s_i·β_i（不碰权重、不碰学习） */
-        int hbase = net->input_count;
+        /* v8 T2 上界：外部线性读出 ω = Σ s_i·β_i（不碰权重、不碰学习）
+         * v9 T2c：源层可选（ext_src=0 hidden / 1 input），base/cnt 随之切换。 */
+        const int src_input = (net->ext_src == 1);
+        const int base = src_input ? 0 : net->input_count;
+        const int cnt  = src_input ? net->input_count : net->hidden_count;
         double s1 = 0.0, s2 = 0.0;
-        for (int hi = 0; hi < net->hidden_count; hi++) {
-            if (!net->neurons[hbase + hi].is_spiking) continue;
+        for (int hi = 0; hi < cnt; hi++) {
+            if (!net->neurons[base + hi].is_spiking) continue;
             s1 += net->ext_beta[hi];
-            s2 += net->ext_beta[net->hidden_count + hi];
+            s2 += net->ext_beta[cnt + hi];
         }
         omega1_cmd = s1;
         omega2_cmd = s2;
