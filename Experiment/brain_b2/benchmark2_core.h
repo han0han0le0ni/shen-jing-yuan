@@ -216,6 +216,15 @@ typedef struct {
     /* 误差的滑动预期：真正驱动学习的是 de = e - EMA(e)（预测误差/意外），
      * 而不是绝对误差 e。绝对误差是直流分量，会把权重单向推到饱和。 */
     double cf_ema1, cf_ema2;
+
+    /* v8（T2 解码可学性上界）：外部线性读出与链路对照。
+     * ext_beta 长度 = 2*hidden_count（前一半 joint1，后一半 joint2），
+     * 由 net2_set_ext_readout 复制进来；ext_on=1 时绕过 motor 层解码，
+     * ω = Σ_hidden s_i·β_i（不做任何权重修改，纯读）。 */
+    double* ext_beta;
+    int ext_on;
+    /* 0 = 正常解码；1 = 直接用解析 ω*（cf_omega*）驱动臂，仅作评估链路对照。 */
+    int drive_mode;
 } NetworkState2;
 
 /* ============================================================
@@ -252,6 +261,13 @@ void net2_inject_modulation(NetworkState2* net, double r1, double r2,
                             int delay_ticks);
 /* 读取最近一 tick 的攀爬纤维状态：[err1, err2, omega1*, omega2*] */
 void net2_get_cf_error(const NetworkState2* net, double* out4);
+
+/* v8（T2 上界实验，不改判据状态）
+ * net2_set_ext_readout：把 2*hidden_count 个系数复制进网络并启用外部线性读出；
+ *   返回 0 成功。-1 = 参数非法（net 为空 / beta 为空）。
+ * net2_set_drive_mode：0=正常解码，1=用解析 ω* 直接驱动（评估链路对照）。 */
+int  net2_set_ext_readout(NetworkState2* net, const double* beta);
+void net2_set_drive_mode(NetworkState2* net, int mode);
 
 /* 物理步进（宿主可选手动控制） */
 void arm_step(ArmState* arm, double omega1_cmd, double omega2_cmd);

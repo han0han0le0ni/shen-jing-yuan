@@ -73,6 +73,12 @@ struct B2Config {
     int budget        = 0;   /* >0：每 episode 固定跑这么多 tick，到达也不提前结束（§0.3） */
     int prop_mode     = 0;   /* 0=full(含目标方位差) 1=raw(只 θ1/θ2) */
     int eval_episodes = 0;   /* >0：最后 N 轮冻结学习（use_reward_modulation=0）做评估 */
+
+    /* v8（T2 解码可学性上界）：hidden 发放导出 / 外部线性读出 / 链路对照 */
+    std::string dump_hidden;    /* 非空：按 stride 导出 hidden 发放到该二进制文件 */
+    std::string load_readout;   /* 非空：读取 2*hidden 个 double 作为外部线性读出 */
+    int stride      = 10;       /* 导出采样间隔（tick） */
+    int drive_direct = 0;       /* 1=用解析 ω* 直接驱动臂（评估链路对照） */
 };
 
 static unsigned int h_rand;
@@ -181,6 +187,10 @@ int main(int argc, char* argv[]) {
         }
         else if (a == "--budget")        next(cfg.budget);
         else if (a == "--eval-episodes") next(cfg.eval_episodes);
+        else if (a == "--dump-hidden")   { if (i+1<argc) cfg.dump_hidden = argv[++i]; }
+        else if (a == "--load-readout")  { if (i+1<argc) cfg.load_readout = argv[++i]; }
+        else if (a == "--stride")        next(cfg.stride);
+        else if (a == "--drive-direct")  cfg.drive_direct = 1;
         else if (a == "--prop-mode")     { std::string m = (i+1<argc) ? argv[++i] : ""; cfg.prop_mode = (m == "raw") ? 1 : 0; }
         else if (a == "--reward-mode")  { std::string m = (i+1<argc) ? argv[++i] : ""; cfg.reward_mode = (m == "potential") ? 1 : 0; }
         else if (a == "--no-reward-baseline") cfg.use_reward_baseline = 0;
@@ -318,6 +328,36 @@ int main(int argc, char* argv[]) {
     printf("El Trace: %d, Reward Mod: %d\n",
            net.use_eligibility_trace, net.use_reward_modulation);
     printf("Net: %d neurons, %d synapses\n", net.neuron_count, net.synapse_count);
+
+    /* v8（T2 上界实验）：外部线性读出 / 链路对照 / hidden 发放导出 */
+    if (!cfg.load_readout.empty()) {
+        size_t want = (size_t)net.hidden_count * 2;
+        FILE* rf = fopen(cfg.load_readout.c_str(), "rb");
+        if (!rf) { fprintf(stderr, "Cannot open %s\n", cfg.load_readout.c_str()); net2_destroy(&net); return 1; }
+        double* beta = (double*)malloc(want * sizeof(double));
+        size_t got = beta ? fread(beta, sizeof(double), want, rf) : 0;
+        fclose(rf);
+        if (got != want) {
+            fprintf(stderr, "readout size mismatch: got %zu want %zu\n", got, want);
+            free(beta); net2_destroy(&net); return 1;
+        }
+        net2_set_ext_readout(&net, beta);
+        free(beta);
+        net.use_reward_modulation = 0;
+        printf("Ext readout: %zu coeffs loaded, learning OFF\n", want);
+    }
+    if (cfg.drive_direct) {
+        net2_set_drive_mode(&net, 1);
+        net.use_reward_modulation = 0;
+        printf("Drive: direct omega* (link check), learning OFF\n");
+    }
+    FILE* dh = NULL;
+    if (!cfg.dump_hidden.empty()) {
+        dh = fopen(cfg.dump_hidden.c_str(), "wb");
+        if (!dh) { fprintf(stderr, "Cannot open %s\n", cfg.dump_hidden.c_str()); net2_destroy(&net); return 1; }
+        int hdr[3] = { 0x42325432, net.hidden_count, cfg.stride };
+        fwrite(hdr, sizeof(int), 3, dh);
+    }
     
     FILE* fp = fopen(cfg.out_csv.c_str(), "w");
     if (!fp) { net2_destroy(&net); fprintf(stderr, "Cannot open %s\n", cfg.out_csv.c_str()); return 1; }
@@ -479,6 +519,20 @@ int main(int argc, char* argv[]) {
             net2_inject_reward(&net, r, 0);
             ticks_used = t + 1;
 
+            /* v8：hidden 发放导出（T2 上界实验的数据采集） */
+            if (dh && (t % cfg.stride == 0)) {
+                const int hbase = net.input_count;
+                unsigned char bit;
+                for (int hi = 0; hi < net.hidden_count; hi++) {
+                    bit = (unsigned char)(net.neurons[hbase + hi].is_spiking ? 1 : 0);
+                    fwrite(&bit, 1, 1, dh);
+                }
+                double meta[8] = { (double)t, net.cf_omega1_star, net.cf_omega2_star,
+                                   net.arm.theta1, net.arm.theta2, net.arm.end_x,
+                                   net.arm.end_y, (double)ep };
+                fwrite(meta, sizeof(double), 8, dh);
+            }
+
             /* 碰到目标即结束本轮：先多跑 1 tick 消费刚注入的 bonus（reward 队列
              * 在下一 tick 开头才处理），否则下个 episode 开头 queue 清零会丢掉奖励。 */
             if (cfg.speed_mode && just_arrived && cfg.budget <= 0) {
@@ -533,6 +587,7 @@ int main(int argc, char* argv[]) {
     }
     
     fclose(fp);
+    if (dh) fclose(dh);
     
     /* 统计 */
     std::vector<double> ratios;

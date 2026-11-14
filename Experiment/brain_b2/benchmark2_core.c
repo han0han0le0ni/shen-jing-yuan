@@ -433,6 +433,11 @@ int net2_init(NetworkState2* net, int input_n, int hidden_n,
     net->hp.hetero_tune    = 0.0;
     net->hp.prop_mode      = 0;   /* full：与历史实验逐位一致 */
 
+    /* v8：T2 上界实验的外部读出（默认关闭，旧路径逐位不变） */
+    net->ext_beta   = NULL;
+    net->ext_on     = 0;
+    net->drive_mode = 0;
+
     #if ELIGIBILITY_TRACE_ENABLE
     net->use_eligibility_trace = 1;
     #else
@@ -469,7 +474,29 @@ void net2_destroy(NetworkState2* net) {
     if (net->neurons) free(net->neurons);
     if (net->synapses) free(net->synapses);
     if (net->reward_history) free(net->reward_history);
+    if (net->ext_beta) free(net->ext_beta);
     memset(net, 0, sizeof(NetworkState2));
+}
+
+/* v8（T2 上界实验）：外部线性读出。beta 长度 2*hidden_count，
+ * 前一半是 joint1 的系数、后一半是 joint2 的。只读叠加，不改权重与学习。 */
+int net2_set_ext_readout(NetworkState2* net, const double* beta) {
+    if (!net || !beta) return -1;
+    if (net->hidden_count <= 0) return -1;
+    size_t n = (size_t)net->hidden_count * 2;
+    double* buf = (double*)malloc(n * sizeof(double));
+    if (!buf) return -1;
+    memcpy(buf, beta, n * sizeof(double));
+    if (net->ext_beta) free(net->ext_beta);
+    net->ext_beta = buf;
+    net->ext_on = 1;
+    return 0;
+}
+
+void net2_set_drive_mode(NetworkState2* net, int mode) {
+    if (!net) return;
+    net->drive_mode = (mode == 1) ? 1 : 0;
+    if (net->drive_mode == 1) net->ext_on = 0;
 }
 
 int net2_neuron_count(const NetworkState2* net) {
@@ -828,7 +855,22 @@ void net2_tick(NetworkState2* net) {
     /* Step 4: SNN 解码 → 直接平均所有 spike winner 的 pref_omega
      * STDP 是 spike-based，解码也用 spike-based 方式，信号匹配 */
     double omega1_cmd = 0.0, omega2_cmd = 0.0;
-    if (net->hp.decode_mode == 2) {
+    if (net->ext_on && net->ext_beta) {
+        /* v8 T2 上界：外部线性读出 ω = Σ_hidden s_i·β_i（不碰权重、不碰学习） */
+        int hbase = net->input_count;
+        double s1 = 0.0, s2 = 0.0;
+        for (int hi = 0; hi < net->hidden_count; hi++) {
+            if (!net->neurons[hbase + hi].is_spiking) continue;
+            s1 += net->ext_beta[hi];
+            s2 += net->ext_beta[net->hidden_count + hi];
+        }
+        omega1_cmd = s1;
+        omega2_cmd = s2;
+    } else if (net->drive_mode == 1) {
+        /* v8 评估链路对照：直接用上一 tick 的解析 ω*（1 tick 延迟，已记录在报告里） */
+        omega1_cmd = net->cf_omega1_star;
+        omega2_cmd = net->cf_omega2_star;
+    } else if (net->hp.decode_mode == 2) {
         /* 加权解码结果在 WTA 阶段算好（膜电位那时还未被重置） */
         omega1_cmd = net->decoded_omega1;
         omega2_cmd = net->decoded_omega2;
