@@ -431,6 +431,7 @@ int net2_init(NetworkState2* net, int input_n, int hidden_n,
     net->hp.hetero_tau     = 0.0;
     net->hp.hetero_thresh  = 0.0;
     net->hp.hetero_tune    = 0.0;
+    net->hp.prop_mode      = 0;   /* full：与历史实验逐位一致 */
 
     #if ELIGIBILITY_TRACE_ENABLE
     net->use_eligibility_trace = 1;
@@ -618,6 +619,12 @@ void net2_tick(NetworkState2* net) {
             if (n->type == NT_INPUT_PROP) {
                 /* 本体感觉/方位特征：偏好角度 vs 当前特征角（环形距离） */
                 int tag = (int)(n->pref_x + 0.5);
+                /* v7 prop_mode=1（raw）：tag2/tag3 是由解析几何算出的目标方位差，
+                 * g=0 严格口径下不给，保持静息，只剩 θ1/θ2 纯本体感觉。 */
+                if (net->hp.prop_mode == 1 && tag >= 2) {
+                    n->membrane_potential = MEMBRANE_REST;
+                    continue;
+                }
                 double th;
                 if (tag == 0) {
                     th = net->arm.theta1;
@@ -704,6 +711,11 @@ void net2_tick(NetworkState2* net) {
         for (int m_layer = 0; m_layer < 2; m_layer++) {
             int base = (m_layer == 0) ? m1_base : m2_base;
             int count = (m_layer == 0) ? net->motor1_count : net->motor2_count;
+
+            /* v7 decode_mode=3（PDc 群体解码）：不做 k-WTA 截断，
+             * 保留本 tick 所有越阈的运动神经元；Step 4 的 else 分支按全部发放
+             * 神经元对 pref_omega 取平均，即 Σ s_i·pref_i / Σ s_i。 */
+            if (net->hp.decode_mode == 3) continue;
             
             /* 正确的 k-winner 算法：
              * 维护 K 个 winner，每次找到最小的 winner，若当前神经元更大则替换 */
@@ -1060,8 +1072,11 @@ int net2_set_param(NetworkState2* net, const char* name, double value) {
         if (value < 0.0) return -1;
         hp->trace_clamp = value;
     } else if (b2_param_is(name, "decode_mode")) {
-        if (value != 0.0 && value != 2.0) return -1;
+        if (value != 0.0 && value != 2.0 && value != 3.0) return -1;
         hp->decode_mode = (int)value;
+    } else if (b2_param_is(name, "prop_mode")) {
+        if (value != 0.0 && value != 1.0) return -1;
+        hp->prop_mode = (int)value;
     } else if (b2_param_is(name, "wta_k")) {
         if (value < 1.0 || value > 64.0) return -1;
         hp->wta_k = (int)value;
@@ -1090,7 +1105,9 @@ int net2_set_param(NetworkState2* net, const char* name, double value) {
         if (value < 0.0 || value > 10.0) return -1;
         hp->novelty_gain = value;
     } else if (b2_param_is(name, "cf_lambda")) {
-        if (value < 0.1 || value > 10.0) return -1;
+        /* v7：允许 0 = 明确关闭解析逆运动学期望速度（g=0 口径）。
+         * 注意 core 仍会计算 omega* 供诊断，但 error_gain=0 时它没有任何通往权重的路径。 */
+        if (value < 0.0 || value > 10.0) return -1;
         hp->cf_lambda = value;
     } else if (b2_param_is(name, "hetero_tau")) {
         if (value < 0.0 || value > 1.0) return -1;
@@ -1136,6 +1153,7 @@ double net2_get_param(const NetworkState2* net, const char* name) {
     B2_GET("novelty_gain", hp->novelty_gain);
     B2_GET("cf_lambda", hp->cf_lambda);
     B2_GET("hetero_tau", hp->hetero_tau);
+    B2_GET("prop_mode", hp->prop_mode);
     B2_GET("hetero_thresh", hp->hetero_thresh);
     B2_GET("hetero_tune", hp->hetero_tune);
     B2_GET("cf_err1", net->cf_err1);

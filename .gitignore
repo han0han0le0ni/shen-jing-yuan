@@ -103,3 +103,6 @@ Experiment/data/b1_nm_align/
 # neuromod 参考实现对照（可复现：tools/nm_synapse_compare.py；crate 构建产物不入库）
 Experiment/data/b1_nm_syn/
 Experiment/ref_neuromod/target/
+
+# B2 原始数据（可复现：benchmark2.exe --preset m2；含历史 data_b2/*.csv 与日志）
+Experiment/data_b2/

@@ -68,6 +68,11 @@ struct B2Config {
     double hetero_tau    = 0.0;   /* 运动层膜时间常数对数正态 sigma */
     double hetero_thresh = 0.0;   /* 运动层阈值高斯 sigma (mV) */
     double hetero_tune   = 0.0;   /* 运动层调谐宽度对数正态 sigma */
+
+    /* v7（M2 探针）：固定预算 + 评估段 + 纯状态输入 */
+    int budget        = 0;   /* >0：每 episode 固定跑这么多 tick，到达也不提前结束（§0.3） */
+    int prop_mode     = 0;   /* 0=full(含目标方位差) 1=raw(只 θ1/θ2) */
+    int eval_episodes = 0;   /* >0：最后 N 轮冻结学习（use_reward_modulation=0）做评估 */
 };
 
 static unsigned int h_rand;
@@ -114,6 +119,35 @@ int main(int argc, char* argv[]) {
     B2Config cfg;
     bool force_no_trace = false;
     bool force_no_reward = false;
+
+    /* v7：--preset m2 的默认值在解析之前写入，令后续 CLI 参数可覆盖（便于冒烟与单变量 A/B）。
+     * 旧预设 fix1/fix2/fix3 仍在解析之后按原顺序叠加，保持历史行为逐位不变。 */
+    {
+        std::string pre;
+        for (int i = 1; i < argc; i++) {
+            if (std::string(argv[i]) == "--preset" && i + 1 < argc) pre = argv[i + 1];
+        }
+        if (pre == "m2") {
+            cfg.input_n = 1000; cfg.hidden_n = 3500;
+            cfg.motor1_n = 250; cfg.motor2_n = 250;
+            cfg.budget = 1200;
+            cfg.decode_mode = 3;
+            cfg.reward_mode = 1;
+            cfg.use_reward_baseline = 1;
+            cfg.cf_lambda = 0.0;
+            cfg.error_gain = 0.0;
+            cfg.novelty_gain = 0.0;
+            cfg.hetero_tau = 0.25;
+            cfg.hetero_thresh = 2.0;
+            cfg.hetero_tune = 0.25;
+            cfg.prop_mode = 1;
+            cfg.episodes = 320;
+            cfg.eval_episodes = 20;
+            cfg.score_horizon = 1200;
+            cfg.target_mode = 0;
+        }
+    }
+
     for (int i = 1; i < argc; i++) {
         std::string a = argv[i];
         auto next = [&](int& v) { if (i+1<argc) v = atoi(argv[++i]); };
@@ -141,7 +175,13 @@ int main(int argc, char* argv[]) {
         else if (a == "--trace-clamp")  nextf(cfg.trace_clamp);
         else if (a == "--tau-trace")    nextf(cfg.tau_trace);
         else if (a == "--wta-k")        next(cfg.wta_k);
-        else if (a == "--decode-mode")  { std::string m = (i+1<argc) ? argv[++i] : ""; cfg.decode_mode = (m == "weighted") ? 2 : 0; }
+        else if (a == "--decode-mode")  {
+            std::string m = (i+1<argc) ? argv[++i] : "";
+            cfg.decode_mode = (m == "weighted") ? 2 : (m == "pdc" ? 3 : 0);
+        }
+        else if (a == "--budget")        next(cfg.budget);
+        else if (a == "--eval-episodes") next(cfg.eval_episodes);
+        else if (a == "--prop-mode")     { std::string m = (i+1<argc) ? argv[++i] : ""; cfg.prop_mode = (m == "raw") ? 1 : 0; }
         else if (a == "--reward-mode")  { std::string m = (i+1<argc) ? argv[++i] : ""; cfg.reward_mode = (m == "potential") ? 1 : 0; }
         else if (a == "--no-reward-baseline") cfg.use_reward_baseline = 0;
         else if (a == "--preset")       { if (i+1<argc) cfg.preset = argv[++i]; }
@@ -190,8 +230,10 @@ int main(int argc, char* argv[]) {
     if (cfg.preset == "fix3") {
         cfg.tau_trace = 200.0; cfg.trace_clamp = 2.0;              /* 3) 资格迹（对照用） */
     }
+    /* v7：M2 预设的默认值已在解析前写入（见 main 开头），这里只做合法性校验，
+     * 不再二次覆盖 CLI。 */
     if (cfg.preset != "legacy" && cfg.preset != "fix1" &&
-        cfg.preset != "fix2" && cfg.preset != "fix3") {
+        cfg.preset != "fix2" && cfg.preset != "fix3" && cfg.preset != "m2") {
         fprintf(stderr, "Unknown preset: %s\n", cfg.preset.c_str());
         return 1;
     }
@@ -249,6 +291,7 @@ int main(int argc, char* argv[]) {
         {"error_gain", cfg.error_gain}, {"novelty_gain", cfg.novelty_gain},
         {"cf_lambda", cfg.cf_lambda},  {"hetero_tau", cfg.hetero_tau},
         {"hetero_thresh", cfg.hetero_thresh},         {"hetero_tune", cfg.hetero_tune},
+        {"prop_mode", (double)cfg.prop_mode},
     };
     for (const auto& p : v6) {
         if (net2_set_param(&net, p.name, p.v) != 0) {
@@ -280,7 +323,7 @@ int main(int argc, char* argv[]) {
     if (!fp) { net2_destroy(&net); fprintf(stderr, "Cannot open %s\n", cfg.out_csv.c_str()); return 1; }
     /* 原 7 列保持不变，末尾追加耗时/到达信息，旧脚本按前 7 列读仍兼容 */
     fprintf(fp, "episode,target_x,target_y,init_dist,final_dist,dist_ratio,final_reward,"
-                "ticks_used,arrived,arrival_tick\n");
+                "ticks_used,arrived,arrival_tick,is_eval\n");
     
     /* 元数据 sidecar：超参/构建信息随输出一起落盘，保证可复现 */
     std::string meta_path = cfg.out_csv + ".meta.json";
@@ -327,10 +370,17 @@ int main(int argc, char* argv[]) {
     std::vector<int> arrived_flags;
     std::vector<int> arrival_ticks;
     
+    const int rom_base = net.use_reward_modulation;
     for (int ep = 0; ep < cfg.episodes; ep++) {
         double tx, ty;
         gen_target(cfg, ep, &tx, &ty);
         net2_set_target(&net, tx, ty);
+
+        /* v7：最后 eval_episodes 轮冻结学习（权重与迹不再更新），用于 g=0 能力评估。
+         * 消融 --disable_reward 仍然全局生效。 */
+        const bool is_eval = (cfg.eval_episodes > 0) &&
+                             (ep >= cfg.episodes - cfg.eval_episodes);
+        net.use_reward_modulation = (rom_base == 0 || is_eval) ? 0 : 1;
         
         /* 重置关节到初始位置 + EMA 平滑状态（含角速度/奖励/最大伸展） */
         net.arm.theta1 = 0.0;
@@ -376,8 +426,10 @@ int main(int argc, char* argv[]) {
         bool arrived = false;          /* 首次到达后不再重复发 bonus，避免刷分 */
         int arrival_tick = -1;         /* -1 = 本轮未到达 */
         int ticks_used = 0;
-        /* 到达是唯一的正常结束条件；安全阀只用于避免永远到不了目标 */
-        int ep_limit = cfg.speed_mode ? cfg.max_ticks_per_ep : cfg.score_horizon;
+        /* 到达是唯一的正常结束条件；安全阀只用于避免永远到不了目标。
+         * v7：--budget N 时改为固定预算（§0.3），到达也不提前结束。 */
+        int ep_limit = (cfg.budget > 0) ? cfg.budget
+                                       : (cfg.speed_mode ? cfg.max_ticks_per_ep : cfg.score_horizon);
         for (int t = 0; ep_limit <= 0 || t < ep_limit; t++) {
             net2_tick(&net);
             
@@ -429,7 +481,7 @@ int main(int argc, char* argv[]) {
 
             /* 碰到目标即结束本轮：先多跑 1 tick 消费刚注入的 bonus（reward 队列
              * 在下一 tick 开头才处理），否则下个 episode 开头 queue 清零会丢掉奖励。 */
-            if (cfg.speed_mode && just_arrived) {
+            if (cfg.speed_mode && just_arrived && cfg.budget <= 0) {
                 net2_tick(&net);   /* 先消费刚注入的奖励，再进入下一轮 */
                 break;
             }
@@ -446,9 +498,9 @@ int main(int argc, char* argv[]) {
         double safe_init = init_dist > 1e-6 ? init_dist : 1e-6;
         double ratio = final_dist / safe_init;
         
-        if (fprintf(fp, "%d,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%d,%d,%d\n",
+        if (fprintf(fp, "%d,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%d,%d,%d,%d\n",
                     ep, tx, ty, init_dist, final_dist, ratio, net.arm.reward,
-                    ticks_used, arrived ? 1 : 0, arrival_tick) < 0) {
+                    ticks_used, arrived ? 1 : 0, arrival_tick, is_eval ? 1 : 0) < 0) {
             fprintf(stderr, "Failed to write %s\n", cfg.out_csv.c_str());
             fclose(fp);
             net2_destroy(&net);

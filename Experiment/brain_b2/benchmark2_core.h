@@ -151,6 +151,11 @@ typedef struct {
     double hetero_tau;       /* 运动层膜衰减对数正态 sigma，0=关闭 */
     double hetero_thresh;    /* 运动层发放阈值高斯 sigma (mV)，0=关闭 */
     double hetero_tune;      /* 运动层调谐宽度对数正态 sigma，0=关闭 */
+    /* v7（M2 探针）：本体感觉输入模式。
+     * 0 = full（56 维：θ1/θ2 + 目标方位差 tag2/tag3，默认，与历史实验一致）
+     * 1 = raw （只给 θ1/θ2，tag2/tag3 保持静息）——用于 g=0 严格口径，
+     *     去掉由解析几何生成的目标方位特征，只保留纯状态输入。 */
+    int    prop_mode;
 
 } HyperParams2;
 
