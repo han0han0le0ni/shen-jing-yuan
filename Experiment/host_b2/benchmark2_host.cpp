@@ -187,6 +187,7 @@ int main(int argc, char* argv[]) {
         }
         else if (a == "--budget")        next(cfg.budget);
         else if (a == "--eval-episodes") next(cfg.eval_episodes);
+        else if (a == "--avg-conn")      nextf(cfg.avg_conn);
         else if (a == "--dump-hidden")   { if (i+1<argc) cfg.dump_hidden = argv[++i]; }
         else if (a == "--load-readout")  { if (i+1<argc) cfg.load_readout = argv[++i]; }
         else if (a == "--stride")        next(cfg.stride);
