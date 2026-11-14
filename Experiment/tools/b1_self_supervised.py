@@ -86,6 +86,9 @@ SUITES = {
     # v116 —— §1 强制报告：neuromod（Rust）同种子统计等价的本侧工件
     "v116": ("b1_ref", "ref_summary.jsonl",
              "b1_neuromod_reference_2026-11-13.md"),
+    # v117 —— 第 4 项前置：neuromod 默认迹参数（单迹 τe=50）对齐对照
+    "v117": ("b1_nm_align", "nm_align_summary.jsonl",
+             "b1_neuromod_param_alignment_2026-11-14.md"),
 }
 SUITE = "v18"
 DATA = ROOT / "data" / "b1_ssp"
@@ -1019,6 +1022,73 @@ def run_all_v116(quick=False):
     return rows
 
 
+# ============================================================
+# v117 · neuromod 迹参数对齐（§1 强制报告第 4 项的前置）
+# 预注册：audit/b1_prereg_neuromod_rule_2026-11-14.md §1
+# ============================================================
+NM_DELAYS = (10, 200, 1000)
+NM_ARMS = (
+    ("multi", None),                 # K=3，20/100/500（现行）
+    ("single50", (1, 50.0, 0.0, 0.0)),    # neuromod 0.6.0 默认单迹 tau=50
+    ("single200", (1, 200.0, 0.0, 0.0)),  # §6.10 旧单尺度口径
+)
+
+
+def rankdata(xs):
+    order = sorted(range(len(xs)), key=lambda i: xs[i])
+    ranks = [0.0] * len(xs)
+    i = 0
+    while i < len(order):
+        j = i
+        while j + 1 < len(order) and xs[order[j + 1]] == xs[order[i]]:
+            j += 1
+        avg = (i + j) / 2.0 + 1.0
+        for k in range(i, j + 1):
+            ranks[order[k]] = avg
+        i = j + 1
+    return ranks
+
+
+def spearman(a, b):
+    ra, rb = rankdata(a), rankdata(b)
+    ma, mb = mean(ra), mean(rb)
+    num = sum((x - ma) * (y - mb) for x, y in zip(ra, rb))
+    den = math.sqrt(sum((x - ma) ** 2 for x in ra) * sum((y - mb) ** 2 for y in rb))
+    return (num / den) if den > 1e-12 else float("nan")
+
+
+def run_all_v117(quick=False):
+    """neuromod 默认迹参数（单迹 τe=50）与多尺度迹对齐对照。"""
+    d = load_dll()
+    seeds = SEED_POOL[:3] if quick else SEED_POOL
+    trials = 120 if quick else TRIALS
+    ev_trials = 60 if quick else EVAL_TRIALS
+    rows, t0 = [], time.time()
+
+    def add(*args, **kw):
+        kw.setdefault("n", trials)
+        kw.setdefault("eval_n", ev_trials)
+        r = experiment(*args, **kw)
+        rows.append(r)
+        print(f"[nm] {r['label']:<14} seed={r['seed']:<4} "
+              f"K={r['trace_k']} tau0={r['tau_vec'][0]:.0f} "
+              f"g0={r['g0_acc']:6.2f}% tie={r['g0_tie_rate']:5.1f}%", flush=True)
+        return r
+
+    for cfg, tr in NM_ARMS:
+        for dl in NM_DELAYS:
+            for s in seeds:
+                add(d, s, "nm", label=f"{cfg}_D{dl}", delay=dl,
+                    explore=(4.0, 1), trace=tr, trace_every=10)
+
+    DATA.mkdir(parents=True, exist_ok=True)
+    with SUMMARY_JSONL.open("w", encoding="utf-8") as f:
+        for r in rows:
+            f.write(json.dumps(r, ensure_ascii=False) + "\n")
+    print(f"完成 {len(rows)} 行，用时 {time.time() - t0:.1f}s -> {SUMMARY_JSONL}")
+    return rows
+
+
 def run_all(quick=False):
     if SUITE == "v19":
         return run_all_v19(quick)
@@ -1036,6 +1106,8 @@ def run_all(quick=False):
         return run_all_v115(quick)
     if SUITE == "v116":
         return run_all_v116(quick)
+    if SUITE == "v117":
+        return run_all_v117(quick)
     d = load_dll()
     seeds = MASTER_SEEDS[:3] if quick else MASTER_SEEDS
     dseeds = MASTER_SEEDS[:2] if quick else MASTER_SEEDS[:3]
@@ -2442,6 +2514,147 @@ def build_report_v116(rows):
     print(f"报告 -> {REPORT_MD}")
 
 
+def build_report_v117(rows):
+    """neuromod 默认迹参数对齐对照（§1 强制报告第 4 项的前置）。"""
+    a = []
+    ap = a.append
+    core = sha1(ROOT / "brain" / "benchmark1_core.c")
+    seeds = sorted({r["seed"] for r in rows})
+    ntr = rows[0]["n"] if rows else 0
+
+    def arm(cfg, dl):
+        return [r for r in rows if r["label"] == f"{cfg}_D{dl}"]
+
+    def curve(cfg, dl):
+        g = arm(cfg, dl)
+        if not g:
+            return []
+        L = min(len(r["trace_curve"]) for r in g if r.get("trace_curve"))
+        return [mean([r["trace_curve"][i] for r in g]) for i in range(L)]
+
+    ap("# neuromod 迹参数对齐：单迹 τe=50 vs 多尺度 20/100/500（判据 §1 第 4 项前置 / v1.17）")
+    ap("")
+    ap(f"> 生成时间：{time.strftime('%Y-%m-%d %H:%M')} · 数据 "
+       f"`data/b1_nm_align/{SUMMARY_JSONL.name}`（{len(rows)} 条 / {len(seeds)} seed / "
+       f"{ntr} 试次，可复算）")
+    ap(f"> 核心 `benchmark1_core.c`（SHA1 `{core[:10]}…`）零改动；σ=4.0 输出层；"
+       f"D ∈ {list(NM_DELAYS)}；迹配置经 `b1s_set_trace`（重算 α）。**阈值零变更**。")
+    ap("> 预注册读法：`audit/b1_prereg_neuromod_rule_2026-11-14.md` §1（运行前落盘）。")
+    ap("")
+    ap("## 0. 结论")
+    ap("")
+    ok_all = True
+    lines = []
+    for dl in NM_DELAYS:
+        m = [r["g0_acc"] for r in arm("multi", dl)]
+        s = [r["g0_acc"] for r in arm("single50", dl)]
+        if not m or not s:
+            continue
+        dmean = mean(s) - mean(m)
+        # 方差比：两侧 SD 都为 0（完全一致）记 1.0；仅分母为 0 才是不可比
+        if sd(m) < 1e-9 and sd(s) < 1e-9:
+            vr = 1.0
+        elif sd(m) < 1e-9:
+            vr = float("inf")
+        else:
+            vr = sd(s) ** 2 / sd(m) ** 2
+        ok = abs(dmean) <= 5.0 and 0.5 <= vr <= 2.0
+        ok_all = ok_all and ok
+        lines.append(f"| {dl} | {mean(m):.2f}% ± {sd(m):.2f} | {mean(s):.2f}% ± {sd(s):.2f} | "
+                     f"{dmean:+.2f}pp | {fmt(vr, 2)} | {'对齐' if ok else '未对齐'} |")
+    ap("| D | multi(20/100/500) | single50(neuromod 默认) | 差 | 方差比 | 判定 |")
+    ap("|---|---|---|---|---|---|")
+    for x in lines:
+        ap(x)
+    ap("")
+    rhos = []
+    for dl in NM_DELAYS:
+        cm, cs = curve("multi", dl), curve("single50", dl)
+        if cm and cs:
+            n = min(len(cm), len(cs))
+            rhos.append((dl, spearman(cm[:n], cs[:n])))
+    ap("迹曲线同形性（30 点，10 seed 均值）："
+       + "，".join(f"D={dl}: ρ={fmt(rho, 3)}" for dl, rho in rhos)
+       + f"（预注册阈值 ρ ≥ 0.8）。")
+    ap("")
+    if ok_all and all(rho >= 0.8 for _, rho in rhos if not math.isnan(rho)):
+        ap("**判定**：按预注册规则，迹参数**可对齐**——把 B1 换成 `neuromod` 的默认单迹 τe=50 后，"
+           "行为均值差 ≤5pp、方差比在 [0.5,2]、迹曲线 ρ ≥0.8。"
+           "因此「迹参数不同」不足以解释两侧差异，**差异必须归因到其余维度**（核时间常数、奖励基线、"
+           "权重域与 L1 归一化、拓扑）。")
+    else:
+        ap("**判定**：按预注册规则，迹参数**未能对齐**——换成单迹 τe=50 后行为或曲线出现超出容差的偏差。"
+           "这意味着「参数未对齐」本身已足以造成不等价，**必须先对齐参数**才谈得上比统计量；"
+           "本轮不宣称任何等价。")
+    ap("")
+    ap("## 1. 行为（g=0，均值 ± SD）")
+    ap("")
+    ap("| 臂 | D=10 | D=200 | D=1000 |")
+    ap("|---|---|---|---|")
+    for cfg, _ in NM_ARMS:
+        cells = []
+        for dl in NM_DELAYS:
+            g = arm(cfg, dl)
+            cells.append(f"{mean([r['g0_acc'] for r in g]):.2f}% ± {sd([r['g0_acc'] for r in g]):.2f}"
+                         if g else "n/a")
+        ap(f"| {cfg} | " + " | ".join(cells) + " |")
+    ap("")
+    ap("| 臂 | D | 平局率 | A/B 分离度 | ≥80% seed | 迹曲线首点 / 末点 |")
+    ap("|---|---|---|---|---|---|")
+    for cfg, _ in NM_ARMS:
+        for dl in NM_DELAYS:
+            g = arm(cfg, dl)
+            if not g:
+                continue
+            c = curve(cfg, dl)
+            ap(f"| {cfg} | {dl} | {mean([r['g0_tie_rate'] for r in g]):.1f}% | "
+               f"{mean([r['g0_stim_separation'] for r in g]):.3f} | "
+               f"{sum(1 for r in g if r['g0_acc'] >= 80.0)}/{len(g)} | "
+               f"{fmt(c[0], 1) if c else 'n/a'} / {fmt(c[-1], 1) if c else 'n/a'} |")
+    ap("")
+    ap("## 2. 逐 seed（g=0 正确率 %）")
+    ap("")
+    ap("| 臂 | D | " + " | ".join(str(s) for s in seeds) + " |")
+    ap("|---" * (len(seeds) + 2) + "|")
+    for cfg, _ in NM_ARMS:
+        for dl in NM_DELAYS:
+            g = {r["seed"]: r["g0_acc"] for r in arm(cfg, dl)}
+            if not g:
+                continue
+            ap(f"| {cfg} | {dl} | " + " | ".join(f"{g[s]:.0f}" for s in seeds) + " |")
+    ap("")
+    ap("## 3. 规则层差异（静态事实，来自 `neuromod` 0.6.0 `rm_stdp` 源码）")
+    ap("")
+    ap("| 维度 | neuromod 0.6.0 | B1 核心 | 可比性 |")
+    ap("|---|---|---|---|")
+    ap("| 迹条数 | 1（带符号） | 3（多尺度） | 本轮 v117 已量化 |")
+    ap("| τe | 50（单值） | 20/100/500，α=1/3 | 本轮 v117 已量化 |")
+    ap("| STDP 核 | τ±=20，A₊=0.01，A₋=0.012 | τ=50，a₊=0.1，a₋=0.12 | **未对齐**（比例同为 1:1.2） |")
+    ap("| 奖励项 | `R`（是否减 baseline 需看 engine.rs） | `y − b`（显式基线中心化） | **未对齐** |")
+    ap("| 权重域 | [0,2] + L1 重归一化 | [0.001,5] 无归一化 | **不可比** |")
+    ap("| 拓扑 | 引擎内部 LIF/Izh 库 | 固定五层 A/B 双通路 | **不可比**（无共同 seed 语义） |")
+    ap("")
+    ap("## 4. 诚实边界")
+    ap("")
+    ap("- 本节**不是**「与 Rust 侧统计等价」的结论：Rust 侧一个数都没跑（BLOCKED 未解除）。"
+       "本节只回答「把可对齐的迹参数对齐后，行为是否还站得住」。")
+    ap("- 单迹 τ=50 与多尺度 20/100/500 的对比在**同一实现内**完成，"
+       "因此差异只反映迹配置，不含跨语言/跨拓扑因素。")
+    ap("- τe=50 是 `neuromod` 的默认值；其文档允许 50–100，本轮未扫其他取值。")
+    ap("- 迹曲线是 `Σ|e|` 的跨试次累加量，量纲与网络规模、发放率相关，"
+       "Spearman ρ 只说明形状同不同，不代表幅度可比。")
+    ap("")
+    ap("## 5. 复现")
+    ap("")
+    ap("```")
+    ap("py -3 Experiment/tools/b1_self_supervised.py --suite v117")
+    ap("py -3 Experiment/tools/b1_self_supervised.py --suite v117 --report-only")
+    ap("```")
+    REPORT_MD.parent.mkdir(parents=True, exist_ok=True)
+    REPORT_MD.write_text("\n".join(a) + "\n", encoding="utf-8")
+    print(f"报告 -> {REPORT_MD}")
+
+
 def build_report(rows):
     if SUITE == "v19":
         return build_report_v19(rows)
@@ -2459,6 +2672,8 @@ def build_report(rows):
         return build_report_v115(rows)
     if SUITE == "v116":
         return build_report_v116(rows)
+    if SUITE == "v117":
+        return build_report_v117(rows)
     a = []
     ap = a.append
     fac = sel(rows, "factorial")

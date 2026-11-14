@@ -94,7 +94,8 @@ Experiment/data/b1_sign/
 Experiment/data/b1_noise/
 Experiment/data/b1_delay/
 
-# B1 收尾原始数据（可复现：--suite v114 tau_e-N / v115 稀疏化 / v116 neuromod 工件）
+# B1 收尾原始数据（可复现：--suite v114 tau_e-N / v115 稀疏化 / v116 neuromod 工件 / v117 迹参数对齐）
 Experiment/data/b1_taun/
 Experiment/data/b1_sparse/
 Experiment/data/b1_ref/
+Experiment/data/b1_nm_align/
