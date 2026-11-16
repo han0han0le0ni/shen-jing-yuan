@@ -63,6 +63,10 @@ struct B2Config {
 
     /* v6：三因子调制 / 攀爬纤维误差 / 异构群体编码（默认全关 = 旧版） */
     double error_gain    = 0.0;   /* 小脑攀爬纤维：关节级有符号误差增益 */
+    /* v13（T2r，签字项）：误差通道可塑范围。0=仅运动层输入突触（默认，旧路径逐位不变）；
+     * 1=额外作用到隐藏层输入突触，方向用 H→M 权重的净贡献（反馈对齐式信用）。 */
+    int    error_scope      = 0;
+    double error_scope_gain = 0.1;
     double novelty_gain  = 0.0;   /* 乙酰胆碱：惊讶度放大学习率 */
     double cf_lambda     = 1.0;   /* 逆运动学期望速度缩放 */
     double hetero_tau    = 0.0;   /* 运动层膜时间常数对数正态 sigma */
@@ -226,6 +230,11 @@ int main(int argc, char* argv[]) {
         else if (a == "--arrive-bonus")     nextf(cfg.arrive_bonus);
         else if (a == "--speed-bonus")      nextf(cfg.speed_bonus);
         else if (a == "--error-gain")       nextf(cfg.error_gain);
+        else if (a == "--error-scope") {
+            std::string m = (i+1<argc) ? argv[++i] : "";
+            cfg.error_scope = (m == "hidden") ? 1 : 0;
+        }
+        else if (a == "--error-scope-gain") nextf(cfg.error_scope_gain);
         else if (a == "--novelty-gain")     nextf(cfg.novelty_gain);
         else if (a == "--cf-lambda")        nextf(cfg.cf_lambda);
         else if (a == "--hetero-tau")       nextf(cfg.hetero_tau);
@@ -337,6 +346,8 @@ int main(int argc, char* argv[]) {
         {"cf_lambda", cfg.cf_lambda},  {"hetero_tau", cfg.hetero_tau},
         {"hetero_thresh", cfg.hetero_thresh},         {"hetero_tune", cfg.hetero_tune},
         {"prop_mode", (double)cfg.prop_mode},
+        {"error_scope", (double)cfg.error_scope},
+        {"error_scope_gain", cfg.error_scope_gain},
     };
     for (const auto& p : v6) {
         if (net2_set_param(&net, p.name, p.v) != 0) {
@@ -351,6 +362,10 @@ int main(int argc, char* argv[]) {
                "hetero(tau=%.3f thresh=%.3f tune=%.3f)\n",
                cfg.error_gain, cfg.novelty_gain, cfg.cf_lambda,
                cfg.hetero_tau, cfg.hetero_thresh, cfg.hetero_tune);
+    }
+    if (cfg.error_scope > 0) {
+        printf("v13: error_scope=hidden error_scope_gain=%.3f (隐藏层输入突触接受误差塑形)\n",
+               cfg.error_scope_gain);
     }
     if (cfg.speed_mode) {
         printf("Speed: ON cost=%.4f radius=%.4f bonus=%.2f speed_bonus=%.2f\n",
@@ -441,6 +456,8 @@ int main(int argc, char* argv[]) {
                     "  \"hetero_tau\": %.4f, \"hetero_thresh\": %.4f, \"hetero_tune\": %.4f,\n",
                 cfg.error_gain, cfg.novelty_gain, cfg.cf_lambda,
                 cfg.hetero_tau, cfg.hetero_thresh, cfg.hetero_tune);
+        fprintf(mf, "  \"error_scope\": %d, \"error_scope_gain\": %.4f,\n",
+                cfg.error_scope, cfg.error_scope_gain);
         fprintf(mf, "  \"el_trace\": %d, \"reward_mod\": %d,\n",
                 net.use_eligibility_trace, net.use_reward_modulation);
         fprintf(mf, "  \"speed_mode\": %d, \"step_cost\": %.4f, \"arrive_radius\": %.4f,\n",

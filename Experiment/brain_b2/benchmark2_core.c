@@ -489,6 +489,12 @@ int net2_init_ex(NetworkState2* net, int input_n, int hidden_n,
     net->rate_tau   = 0.0;
     net->ext_rate   = 0;
 
+    /* v13（T2r）：隐藏层可塑范围默认关闭；缓冲预分配但不参与计算 */
+    net->hp.error_scope      = 0;
+    net->hp.error_scope_gain = 0.1;
+    net->hid_dir = (double*)calloc((size_t)(net->hidden_count > 0 ? net->hidden_count : 1), sizeof(double));
+    if (!net->hid_dir) { net2_destroy(net); return -1; }
+
     #if ELIGIBILITY_TRACE_ENABLE
     net->use_eligibility_trace = 1;
     #else
@@ -535,6 +541,7 @@ void net2_destroy(NetworkState2* net) {
     if (net->reward_history) free(net->reward_history);
     if (net->ext_beta) free(net->ext_beta);
     if (net->rate) free(net->rate);
+    if (net->hid_dir) free(net->hid_dir);
     memset(net, 0, sizeof(NetworkState2));
 }
 
@@ -666,6 +673,23 @@ void net2_tick(NetworkState2* net) {
 
         #if REWARD_MODULATION_ENABLE
         if (net->use_reward_modulation && (has_reward || has_error)) {
+            /* v13（T2r，签字项）：把「该隐藏神经元经 H→M 权重对运动命令的净贡献」
+             * 汇总成标量 hid_dir[h] = Σ_m w_{h→m}·tanh(pref_m/0.15)·e_m，
+             * 供隐藏层输入突触的误差更新做方向（反馈对齐式信用分配）。
+             * error_scope=0 时整段跳过 —— 旧路径逐位不变。 */
+            if (has_error && net->hp.error_scope > 0 && net->hid_dir) {
+                int hn = net->hidden_count;
+                for (int i = 0; i < hn; i++) net->hid_dir[i] = 0.0;
+                for (int s2 = 0; s2 < net->synapse_count; s2++) {
+                    Synapse2* sy = &net->synapses[s2];
+                    NeuronType2 pt2 = net->neurons[sy->post_id].type;
+                    if (pt2 != NT_MOTOR_OMEGA1 && pt2 != NT_MOTOR_OMEGA2) continue;
+                    int h = sy->pre_id - net->input_count;
+                    if (h < 0 || h >= hn) continue;
+                    double ej2 = (pt2 == NT_MOTOR_OMEGA1) ? ev.e1 : ev.e2;
+                    net->hid_dir[h] += sy->weight * tanh(net->neurons[sy->post_id].pref_omega / 0.15) * ej2;
+                }
+            }
             for (int s = 0; s < net->synapse_count; s++) {
                 Synapse2* syn = &net->synapses[s];
                 #if ELIGIBILITY_TRACE_ENABLE
@@ -699,6 +723,19 @@ void net2_tick(NetworkState2* net) {
                         dw += net->hp.learning_rate * net->hp.error_gain * ej * dir * credit;
                     }
                 }
+                /* v13（T2r）：误差通道扩到隐藏层输入突触（默认关闭）。
+                 * 方向取 hid_dir[post]（该隐藏神经元对运动命令的净贡献）；
+                 * 仍要求突触前本 tick 发放（与运动层的 PF–CF 同步条件一致）。 */
+                if (has_error && net->hp.error_scope > 0 && pt == NT_HIDDEN) {
+                    Neuron2* preh = &net->neurons[syn->pre_id];
+                    if (preh->is_spiking) {
+                        int h = syn->post_id - net->input_count;
+                        double dirh = (h >= 0 && h < net->hidden_count) ? net->hid_dir[h] : 0.0;
+                        dw += net->hp.learning_rate * net->hp.error_gain
+                              * net->hp.error_scope_gain * dirh * credit;
+                    }
+                }
+
                 syn->weight = clamp2(syn->weight + dw, WEIGHT_MIN, WEIGHT_MAX);
             }
         }
@@ -1260,6 +1297,13 @@ int net2_set_param(NetworkState2* net, const char* name, double value) {
          * 注意 core 仍会计算 omega* 供诊断，但 error_gain=0 时它没有任何通往权重的路径。 */
         if (value < 0.0 || value > 10.0) return -1;
         hp->cf_lambda = value;
+    } else if (b2_param_is(name, "error_scope")) {
+        /* v13（T2r，签字项）：0=仅运动层（默认，旧路径）；1=+隐藏层输入突触 */
+        if (value < 0.0 || value > 1.0) return -1;
+        hp->error_scope = (int)(value + 0.5);
+    } else if (b2_param_is(name, "error_scope_gain")) {
+        if (value < 0.0 || value > 10.0) return -1;
+        hp->error_scope_gain = value;
     } else if (b2_param_is(name, "hetero_tau")) {
         if (value < 0.0 || value > 1.0) return -1;
         hp->hetero_tau = value;
@@ -1303,6 +1347,8 @@ double net2_get_param(const NetworkState2* net, const char* name) {
     B2_GET("error_gain", hp->error_gain);
     B2_GET("novelty_gain", hp->novelty_gain);
     B2_GET("cf_lambda", hp->cf_lambda);
+    B2_GET("error_scope", (double)hp->error_scope);
+    B2_GET("error_scope_gain", hp->error_scope_gain);
     B2_GET("hetero_tau", hp->hetero_tau);
     B2_GET("prop_mode", hp->prop_mode);
     B2_GET("hetero_thresh", hp->hetero_thresh);

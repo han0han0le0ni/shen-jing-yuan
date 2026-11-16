@@ -148,6 +148,12 @@ typedef struct {
     double error_gain;       /* 运动误差通道增益（攀爬纤维 → 定向 LTD） */
     double novelty_gain;     /* 惊讶度通道增益：瞬时放大学习率 */
     double cf_lambda;        /* 逆运动学期望速度缩放，默认 1.0 */
+    /* v13（T2r，负责人 2026-11-16 签字）：误差通道的可塑范围。
+     * 0 = 仅运动层输入突触（默认，旧路径逐位不变）；1 = 额外作用到隐藏层输入突触，
+     * 方向由「该隐藏神经元经 H→M 权重对运动命令的净贡献」给出（反馈对齐式信用）。
+     * error_scope_gain 是隐藏层信用项的缩放，默认 0.1。 */
+    int    error_scope;
+    double error_scope_gain;
     double hetero_tau;       /* 运动层膜衰减对数正态 sigma，0=关闭 */
     double hetero_thresh;    /* 运动层发放阈值高斯 sigma (mV)，0=关闭 */
     double hetero_tune;      /* 运动层调谐宽度对数正态 sigma，0=关闭 */
@@ -236,6 +242,11 @@ typedef struct {
     double* rate;
     double  rate_tau;
     int     ext_rate;
+
+    /* v13（T2r）：隐藏层方向信用缓冲（每 tick 由 H→M 权重 × 运动偏好 × 关节误差 汇总）。
+     * 仅在 hp.error_scope>0 且 error_gain>0 时写入/读取；默认分配但不参与任何计算，
+     * 因此旧路径逐位不变。hid_dir[i] 对应第 i 个隐藏神经元。 */
+    double* hid_dir;
 } NetworkState2;
 
 /* ============================================================
