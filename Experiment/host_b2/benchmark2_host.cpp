@@ -38,6 +38,14 @@ struct B2Config {
     
     /* 可回退的实验开关：默认值 = 旧版硬编码值 */
     double psp_factor = 25.0;
+    /* v14（M1，负责人 2026-11-16 签字）：内在基电流，默认 = 旧字面量 */
+    double hidden_base = 2.0;
+    double motor_base  = 3.0;
+    /* v15（M3，负责人 2026-11-16 签字「签字」）：学习增益与权重映射增益的独立缩放
+     * lr_scale     = lr 阶梯整体乘子（默认 1.0 = 0.35/0.20/0.04 不变）
+     * weight_scale = 初始化后全部权重整体乘子（默认 1.0 = 不调用 net2_scale_weights） */
+    double lr_scale     = 1.0;
+    double weight_scale = 1.0;
     double trace_clamp = 1.0;
     double tau_trace = 2000.0;
     int decode_mode = 0;          /* 0=WTA 均值, 2=膜电位加权 */
@@ -195,6 +203,10 @@ int main(int argc, char* argv[]) {
         else if (a == "--disable_trace")  force_no_trace = true;
         else if (a == "--disable_reward") force_no_reward = true;
         else if (a == "--psp")          nextf(cfg.psp_factor);
+        else if (a == "--hidden-base")  nextf(cfg.hidden_base);
+        else if (a == "--motor-base")   nextf(cfg.motor_base);
+        else if (a == "--lr-scale")     nextf(cfg.lr_scale);
+        else if (a == "--weight-scale") nextf(cfg.weight_scale);
         else if (a == "--trace-clamp")  nextf(cfg.trace_clamp);
         else if (a == "--tau-trace")    nextf(cfg.tau_trace);
         else if (a == "--wta-k")        next(cfg.wta_k);
@@ -249,6 +261,8 @@ int main(int argc, char* argv[]) {
                    "       [--disable_trace] [--disable_reward]\n"
                    "       [--preset legacy|fix1|fix2|fix3]\n"
                    "       [--psp F --wta-k K --decode-mode wta|weighted --reward-mode combo1|potential]\n"
+                   "       [--hidden-base F --motor-base F]   (内在基电流 mV/tick，默认 2.0 / 3.0)\n"
+                   "       [--lr-scale F --weight-scale F]  (学习增益 / 权重映射增益，默认 1.0)\n"
                    "       [--no-reward-baseline --tau-trace F --trace-clamp F]\n"
                    "       [--speed-reward (默认：每步成本 + 首达奖励 + 碰到即结算重来)]\n"
                    "       [--no-speed-reward (旧对照：固定步数、不结算)]\n"
@@ -328,15 +342,23 @@ int main(int argc, char* argv[]) {
 
     /* 把 CLI/预设参数写入运行时超参（net2_init 里是旧版默认值） */
     net.hp.psp_factor = cfg.psp_factor;
+    net.hp.hidden_base_current = cfg.hidden_base;
+    net.hp.motor_base_current  = cfg.motor_base;
     net.hp.trace_clamp = cfg.trace_clamp;
     net.hp.tau_trace = cfg.tau_trace;
     net.hp.lambda_trace = exp(-1.0 / cfg.tau_trace);
     net.hp.decode_mode = cfg.decode_mode;
     net.hp.wta_k = cfg.wta_k;
     net.hp.use_reward_baseline = cfg.use_reward_baseline;
-    printf("Mode: preset=%s psp=%.2f wta_k=%d decode=%d reward=%d baseline=%d tau=%.0f clamp=%.2f\n",
+    /* v15（M3）：整体权重缩放，必须早于任何 tick；默认 1.0 时完全不调用 */
+    if (cfg.weight_scale != 1.0) {
+        net2_scale_weights(&net, cfg.weight_scale);
+    }
+    printf("Mode: preset=%s psp=%.2f wta_k=%d decode=%d reward=%d baseline=%d tau=%.0f clamp=%.2f"
+           " hb=%.2f mb=%.2f lrs=%.3f ws=%.4f\n",
            cfg.preset.c_str(), cfg.psp_factor, cfg.wta_k, cfg.decode_mode,
-           cfg.reward_mode, cfg.use_reward_baseline, cfg.tau_trace, cfg.trace_clamp);
+           cfg.reward_mode, cfg.use_reward_baseline, cfg.tau_trace, cfg.trace_clamp,
+           cfg.hidden_base, cfg.motor_base, cfg.lr_scale, cfg.weight_scale);
 
     /* v6：三因子调制通道与运动层异质化。走 set_param 以便复用边界校验，
      * 并让 hetero_* 立即重建运动层的异质分布。默认值全 0 = 旧版行为。 */
@@ -448,6 +470,10 @@ int main(int argc, char* argv[]) {
                 cfg.target_mode, cfg.fixed_tx, cfg.fixed_ty);
         fprintf(mf, "  \"lr_schedule\": \"0.35(<500) / 0.20(<2000) / 0.04(else)\",\n");
         fprintf(mf, "  \"weight_max\": %.4f, \"psp_factor\": %.4f,\n", WEIGHT_MAX, cfg.psp_factor);
+        fprintf(mf, "  \"hidden_base_current\": %.4f, \"motor_base_current\": %.4f,\n",
+                cfg.hidden_base, cfg.motor_base);
+        fprintf(mf, "  \"lr_scale\": %.4f, \"weight_scale\": %.4f,\n",
+                cfg.lr_scale, cfg.weight_scale);
         fprintf(mf, "  \"preset\": \"%s\", \"decode_mode\": %d, \"wta_k\": %d, \"reward_mode\": %d,\n",
                 cfg.preset.c_str(), cfg.decode_mode, cfg.wta_k, cfg.reward_mode);
         fprintf(mf, "  \"use_reward_baseline\": %d, \"tau_trace\": %.1f, \"trace_clamp\": %.2f,\n",
@@ -510,9 +536,10 @@ int main(int argc, char* argv[]) {
         /* lr 阶梯：延长高 lr 到 Ep 2000，去掉中间档
          * v10 分析: Ep 600-999 lr=0.20 时 best=0.46, Ep 1000 lr 降到 0.08 反弹到 0.60
          * → lr=0.20 是稳定学习的最优区间，不要降到 0.08！ */
-        if (ep < 500)       net.hp.learning_rate = 0.35;
-        else if (ep < 2000) net.hp.learning_rate = 0.20;
-        else                net.hp.learning_rate = 0.04;
+        /* v15（M3）：lr_scale 默认 1.0 ⇒ 三个阶梯值逐位不变 */
+        if (ep < 500)       net.hp.learning_rate = 0.35 * cfg.lr_scale;
+        else if (ep < 2000) net.hp.learning_rate = 0.20 * cfg.lr_scale;
+        else                net.hp.learning_rate = 0.04 * cfg.lr_scale;
         
         /* 重置神经元膜电位（除了输入层被目标激活） */
         for (int i = 0; i < net.neuron_count; i++) {

@@ -163,6 +163,15 @@ typedef struct {
      *     去掉由解析几何生成的目标方位特征，只保留纯状态输入。 */
     int    prop_mode;
 
+    /* v14（M1，负责人 2026-11-16 签字「可以」）：内在基电流（mV/tick）。
+     * 此前是 tick 内硬编码字面量（core.c L838-843：隐藏 +2.0、运动 +3.0）。
+     * 默认值必须与旧字面量逐位相同，保证历史实验可复现。
+     * 依据：M0 诊断（audit/m0_diag_report_2026-11-16.md）证明 2.0 mV/tick 使隐藏层
+     * 静息不动点达 −25 mV（阈值 −55 mV），是 rheobase 0.5 mV/tick 的 4 倍，
+     * 单独即可把该层推成定频振荡器（psp→0 时密度仍 0.1099 = 1/9）。 */
+    double hidden_base_current;   /* 默认 2.0 */
+    double motor_base_current;    /* 默认 3.0 */
+
 } HyperParams2;
 
 /* ============================================================
@@ -363,6 +372,11 @@ int net2_get_topology(NetworkState2* net,
 void net2_get_snapshot(NetworkState2* net,
                        double* neuron_membrane, double* neuron_spiking, double* neuron_last_spike,
                        double* arm_state, int* meta);
+
+/* v15（M3，负责人 2026-11-16 签字「签字」）：把全部现存权重整体乘 s（初始化后、任何 tick 之前调用一次）。
+ * 用于在不动 PSP 的前提下把"权重→膜电位"的映射增益整体缩小（前向驱动与 C1 工作点对齐）。
+ * s<=0 直接返回；结果 clamp 到 [WEIGHT_MIN, WEIGHT_MAX]。默认路径不调用 → 旧行为逐位不变。 */
+void net2_scale_weights(NetworkState2* net, double s);
 
 /* 写 topology JSON 文件（初始化后调用一次） */
 void net2_dump_topology_json(NetworkState2* net, const char* filepath);

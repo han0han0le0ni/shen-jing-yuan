@@ -478,6 +478,9 @@ int net2_init_ex(NetworkState2* net, int input_n, int hidden_n,
     net->hp.hetero_thresh  = 0.0;
     net->hp.hetero_tune    = 0.0;
     net->hp.prop_mode      = 0;   /* full：与历史实验逐位一致 */
+    /* v14（M1）：内在基电流默认值 = 旧字面量（core.c L838-843），逐位不变 */
+    net->hp.hidden_base_current = 2.0;
+    net->hp.motor_base_current  = 3.0;
 
     /* v8：T2 上界实验的外部读出（默认关闭，旧路径逐位不变） */
     net->ext_beta   = NULL;
@@ -836,10 +839,11 @@ void net2_tick(NetworkState2* net) {
              * 噪声让 WTA winner 每次都略有不同 → 探索不同方向 → 碰到正反馈就能增强权重！
              * 噪声 σ=1.0mV 不大：不会淹没突触电流信号，但足够让 winner 抖动 */
             if (n->type == NT_HIDDEN) {
-                n->membrane_potential += 2.0;
+                /* v14（M1）：基电流改为可配（默认 2.0 = 旧字面量，逐位不变） */
+                n->membrane_potential += net->hp.hidden_base_current;
                 n->membrane_potential += r_gauss(0.0, 0.5);   /* 高斯噪声 σ=0.5（降噪提速） */
             } else if (n->type == NT_MOTOR_OMEGA1 || n->type == NT_MOTOR_OMEGA2) {
-                n->membrane_potential += 3.0;
+                n->membrane_potential += net->hp.motor_base_current;
                 n->membrane_potential += r_gauss(0.0, 0.5);   /* σ=0.5：WTA 更稳，reward 信号更干净 */
             }
         }
@@ -1316,6 +1320,13 @@ int net2_set_param(NetworkState2* net, const char* name, double value) {
         if (value < 0.0 || value > 1.0) return -1;
         hp->hetero_tune = value;
         apply_heterogeneity(net);
+    } else if (b2_param_is(name, "hidden_base_current")) {
+        /* v14（M1，签字项）：0 = 关闭隐藏层内在基电流 */
+        if (value < 0.0 || value > 50.0) return -1;
+        hp->hidden_base_current = value;
+    } else if (b2_param_is(name, "motor_base_current")) {
+        if (value < 0.0 || value > 50.0) return -1;
+        hp->motor_base_current = value;
     } else {
         return -1;
     }
@@ -1336,6 +1347,8 @@ double net2_get_param(const NetworkState2* net, const char* name) {
     B2_GET("weight_decay_lambda", hp->weight_decay_lambda);
     B2_GET("reward_baseline_window", hp->reward_baseline_window);
     B2_GET("psp_factor", hp->psp_factor);
+    B2_GET("hidden_base_current", hp->hidden_base_current);
+    B2_GET("motor_base_current", hp->motor_base_current);
     B2_GET("trace_clamp", hp->trace_clamp);
     B2_GET("decode_mode", hp->decode_mode);
     B2_GET("wta_k", hp->wta_k);
@@ -1405,6 +1418,18 @@ void net2_get_arm(const NetworkState2* net, double* a) {
     a[7] = net->arm.target_y;
     a[8] = net->arm.reward;
     a[9] = net->arm.max_reach;
+}
+
+/* v15（M3）：整体权重缩放（初始化后、任何 tick 之前调用一次） */
+void net2_scale_weights(NetworkState2* net, double s) {
+    int i;
+    if (!net || !net->synapses || !(s > 0.0)) return;
+    for (i = 0; i < net->synapse_count; i++) {
+        double w = net->synapses[i].weight * s;
+        if (w < WEIGHT_MIN) w = WEIGHT_MIN;
+        if (w > WEIGHT_MAX) w = WEIGHT_MAX;
+        net->synapses[i].weight = w;
+    }
 }
 
 /* JSON 拓扑（一次性，初始化后调用） */
