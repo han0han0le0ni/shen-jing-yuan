@@ -487,6 +487,7 @@ class DialogLabWindow:
         lay.addLayout(head)
 
         bar = QHBoxLayout()
+        bar.setSpacing(10)
         self.btn_play = QPushButton("开始训练")
         self.btn_play.clicked.connect(self._toggle)
         bar.addWidget(self.btn_play)
@@ -504,6 +505,7 @@ class DialogLabWindow:
         b.setToolTip("固定随机策略 / 纯 STDP / R-STDP 各跑 300 轮")
         b.clicked.connect(self._baselines)
         bar.addWidget(b)
+        bar.addSpacing(8)
         self.chk_ai = QCheckBox("启用 LM Studio 评分（限 150 轮）")
         self.chk_ai.toggled.connect(self._toggle_ai)
         bar.addWidget(self.chk_ai)

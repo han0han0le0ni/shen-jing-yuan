@@ -244,6 +244,9 @@ class BarChart(QWidget):
 def card(T, title, value, note, color):
     f = QFrame()
     f.setObjectName("Card")
+    # 固定卡片高度：否则放进 QGridLayout 后会被拉伸成一整块空白大卡，
+    # 挤占图表区空间（窗口越高越明显）
+    f.setFixedHeight(96)
     v = QVBoxLayout(f)
     v.setContentsMargins(14, 12, 14, 12)
     v.setSpacing(4)
