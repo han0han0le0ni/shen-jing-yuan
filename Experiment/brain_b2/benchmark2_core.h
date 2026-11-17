@@ -172,6 +172,19 @@ typedef struct {
     double hidden_base_current;   /* 默认 2.0 */
     double motor_base_current;    /* 默认 3.0 */
 
+    /* v17（M4，签字项）：symmetric e-prop
+     *   0 = 旧 R-STDP（默认，逐位不变）
+     *   1 = e-prop：Δw = lr·L_post·z_post·ē_ij，ADAM 更新；R-STDP/误差通道全部关闭
+     * scope：0 = 全通路（I→H/H→H/H→M/I→M），1 = 仅 I→M（消融臂）
+     * alpha：Bellec 伪导数斜率；lr：ADAM 步长 */
+    int    eprop_mode;            /* 默认 0 */
+    int    eprop_scope;           /* 默认 0 */
+    double eprop_alpha;           /* 默认 0.3 */
+    double eprop_lr;              /* 默认 1e-3 */
+    double eprop_beta1;           /* 默认 0.9 */
+    double eprop_beta2;           /* 默认 0.999 */
+    double eprop_eps;             /* 默认 1e-8 */
+
 } HyperParams2;
 
 /* ============================================================
@@ -256,6 +269,15 @@ typedef struct {
      * 仅在 hp.error_scope>0 且 error_gain>0 时写入/读取；默认分配但不参与任何计算，
      * 因此旧路径逐位不变。hid_dir[i] 对应第 i 个隐藏神经元。 */
     double* hid_dir;
+
+    /* v17（M4，负责人 2026-11-17「签字」，预注册 audit/m4_eprop_prereg_2026-11-17.md）：
+     * symmetric e-prop 的逐突触 ADAM 状态与逐神经元学习信号。
+     * eprop_mode=0（默认）时不读不写，旧路径逐位不变；数组恒分配（≤ 2 MB）。 */
+    double* ep_m;        /* ADAM 一阶矩，按突触 */
+    double* ep_v;        /* ADAM 二阶矩，按突触 */
+    double* ep_L;        /* 逐神经元学习信号 L_j（按神经元） */
+    double* ep_z;        /* 逐神经元伪导数 z_j（按神经元） */
+    int     ep_step;     /* ADAM 步数（偏置校正用） */
 } NetworkState2;
 
 /* ============================================================
@@ -377,6 +399,13 @@ void net2_get_snapshot(NetworkState2* net,
  * 用于在不动 PSP 的前提下把"权重→膜电位"的映射增益整体缩小（前向驱动与 C1 工作点对齐）。
  * s<=0 直接返回；结果 clamp 到 [WEIGHT_MIN, WEIGHT_MAX]。默认路径不调用 → 旧行为逐位不变。 */
 void net2_scale_weights(NetworkState2* net, double s);
+
+/* v16（工具缺口，2026-11-17）：权重存取。文本格式，17 位有效数字，可逐位回环。
+ * 导出：首行 "# B2W 1 <neurons> <synapses>"，其后每行 "pre post weight"。
+ * 导入：校验规模一致，成功返回 0，失败返回 -1（不动现有权重）。
+ * 动机：§6.35/§6.39 记录的「训练后网络拿不出来」导致机制解释只能写"推断"。 */
+int net2_export_weights(NetworkState2* net, const char* path);
+int net2_import_weights(NetworkState2* net, const char* path);
 
 /* 写 topology JSON 文件（初始化后调用一次） */
 void net2_dump_topology_json(NetworkState2* net, const char* filepath);

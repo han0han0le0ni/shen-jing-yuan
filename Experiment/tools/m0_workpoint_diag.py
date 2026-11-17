@@ -61,6 +61,10 @@ def load_lib():
         ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_double),
         ctypes.POINTER(ctypes.c_int),
     ]
+    lib.net2_export_weights.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
+    lib.net2_export_weights.restype = ctypes.c_int
+    lib.net2_import_weights.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
+    lib.net2_import_weights.restype = ctypes.c_int
     lib.net2_set_param.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_double]
     lib.net2_set_param.restype = ctypes.c_int
     lib.net2_get_param.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
@@ -150,6 +154,10 @@ def main():
     ap.add_argument("--expect-synapses", type=int, default=115063,
                     help="§6.22 记录的 m2 拓扑突触数，用于确认 DLL 与源码同步")
     ap.add_argument("--out", type=str, default="")
+    ap.add_argument("--load-weights", type=str, default="",
+                    help="初始化后导入权重（用于 import 回环校验）")
+    ap.add_argument("--export-weights", type=str, default="",
+                    help="在初始化后、任何 tick 之前导出权重（用于 load-weights 回环校验）")
     args = ap.parse_args()
 
     lib = load_lib()
@@ -166,6 +174,19 @@ def main():
     psp_now = lib.net2_get_param(net, b"psp_factor")
     hb_now = lib.net2_get_param(net, b"hidden_base_current")
     mb_now = lib.net2_get_param(net, b"motor_base_current")
+    imp_rc = None
+    if args.load_weights:
+        lp = Path(args.load_weights)
+        if not lp.is_absolute():
+            lp = EXP / lp
+        imp_rc = lib.net2_import_weights(net, str(lp).encode("utf-8"))
+    exp_rc = None
+    if args.export_weights:
+        p = Path(args.export_weights)
+        if not p.is_absolute():
+            p = EXP / p
+        p.parent.mkdir(parents=True, exist_ok=True)
+        exp_rc = lib.net2_export_weights(net, str(p).encode("utf-8"))
 
     N = int(lib.net2_neuron_count(net))
     S = int(lib.net2_synapse_count(net))
@@ -283,6 +304,7 @@ def main():
             "motor_base_requested": args.motor_base, "motor_base_effective": mb_now,
             "base_set_param_rc": [hb_rc, mb_rc],
             "target_every": args.target_every, "target": [args.tx, args.ty],
+            "export_weights": args.export_weights, "export_rc": exp_rc,
             "layer_sizes": {"input": int(is_in.sum()), "hidden": int(H), "motor": int(is_m.sum())},
         },
         "topology": {

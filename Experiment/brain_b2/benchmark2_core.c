@@ -498,6 +498,21 @@ int net2_init_ex(NetworkState2* net, int input_n, int hidden_n,
     net->hid_dir = (double*)calloc((size_t)(net->hidden_count > 0 ? net->hidden_count : 1), sizeof(double));
     if (!net->hid_dir) { net2_destroy(net); return -1; }
 
+    /* v17（M4）：e-prop 状态。eprop_mode=0 时恒为 0、不参与任何计算 → 旧路径逐位不变 */
+    net->hp.eprop_mode  = 0;
+    net->hp.eprop_scope = 0;
+    net->hp.eprop_alpha = 0.3;
+    net->hp.eprop_lr    = 1e-3;
+    net->hp.eprop_beta1 = 0.9;
+    net->hp.eprop_beta2 = 0.999;
+    net->hp.eprop_eps   = 1e-8;
+    net->ep_step = 0;
+    net->ep_m = (double*)calloc((size_t)(net->synapse_count > 0 ? net->synapse_count : 1), sizeof(double));
+    net->ep_v = (double*)calloc((size_t)(net->synapse_count > 0 ? net->synapse_count : 1), sizeof(double));
+    net->ep_L = (double*)calloc((size_t)(net->neuron_count > 0 ? net->neuron_count : 1), sizeof(double));
+    net->ep_z = (double*)calloc((size_t)(net->neuron_count > 0 ? net->neuron_count : 1), sizeof(double));
+    if (!net->ep_m || !net->ep_v || !net->ep_L || !net->ep_z) { net2_destroy(net); return -1; }
+
     #if ELIGIBILITY_TRACE_ENABLE
     net->use_eligibility_trace = 1;
     #else
@@ -545,6 +560,10 @@ void net2_destroy(NetworkState2* net) {
     if (net->ext_beta) free(net->ext_beta);
     if (net->rate) free(net->rate);
     if (net->hid_dir) free(net->hid_dir);
+    if (net->ep_m) free(net->ep_m);
+    if (net->ep_v) free(net->ep_v);
+    if (net->ep_L) free(net->ep_L);
+    if (net->ep_z) free(net->ep_z);
     memset(net, 0, sizeof(NetworkState2));
 }
 
@@ -675,7 +694,8 @@ void net2_tick(NetworkState2* net) {
                          (fabs(ev.e1) > 1e-6 || fabs(ev.e2) > 1e-6);
 
         #if REWARD_MODULATION_ENABLE
-        if (net->use_reward_modulation && (has_reward || has_error)) {
+        /* v17（M4）：e-prop 模式下 R-STDP/误差通道整体关闭，避免两套规则叠加 */
+        if (net->use_reward_modulation && !net->hp.eprop_mode && (has_reward || has_error)) {
             /* v13（T2r，签字项）：把「该隐藏神经元经 H→M 权重对运动命令的净贡献」
              * 汇总成标量 hid_dir[h] = Σ_m w_{h→m}·tanh(pref_m/0.15)·e_m，
              * 供隐藏层输入突触的误差更新做方向（反馈对齐式信用分配）。
@@ -851,6 +871,15 @@ void net2_tick(NetworkState2* net) {
         /* 发放判定（先标记，后统一处理 WTA 和膜电位重置） */
         if (n->membrane_potential >= n->spike_threshold) {
             n->is_spiking = 1;
+            /* v17（M4）：伪导数（在重置之前捕获）。
+             * 偏离记录：预注册写的是 Bellec 分段线性式 z=α·max(0,1−|v−θ|/(θ−v_rest))，
+             * 但本网络 EPSP = PSP_FACTOR×w = 25–75 mV 远大于阈值间隔 10 mV，跨阈时过冲常达
+             * 数十 mV ⇒ 该式在运动层恒为 0，实测 320 ep 内 H→M/I→M 权重零更新（梯度消失）。
+             * 故改用**常数代理**（等价于"在阈值处取梯度 α"，硬重置 LIF 的常规做法）；
+             * 见 audit/m4_eprop_report。 */
+            if (net->hp.eprop_mode) {
+                net->ep_z[i] = net->hp.eprop_alpha;
+            }
         }
     }
     
@@ -942,8 +971,9 @@ void net2_tick(NetworkState2* net) {
         }
     }
     
-    /* Step 3: 资格迹更新（事件驱动） */
-    for (s = 0; s < net->synapse_count; s++) {
+    /* Step 3: 资格迹更新（事件驱动）
+     * v17（M4）：e-prop 模式改用 tick 末的「前突触滤波迹」，此处整体跳过，避免双重更新 */
+    for (s = 0; net->hp.eprop_mode == 0 && s < net->synapse_count; s++) {
         Neuron2* pre = &net->neurons[net->synapses[s].pre_id];
         Neuron2* post = &net->neurons[net->synapses[s].post_id];
         
@@ -1093,6 +1123,86 @@ void net2_tick(NetworkState2* net) {
         const double CF_EMA_ALPHA = 0.02;
         net->cf_ema1 += CF_EMA_ALPHA * (net->cf_err1 - net->cf_ema1);
         net->cf_ema2 += CF_EMA_ALPHA * (net->cf_err2 - net->cf_ema2);
+    }
+
+    /* v17（M4，负责人 2026-11-17「签字」）：symmetric e-prop
+     *   L_j = Σ_k w_{j→k}·e_k （k 为运动层，用真实输出权重；e_k = clamp(ω*_k − ω_k, ±1)）
+     *   z_j = α·max(0, 1 − |v_j − θ_j| / (θ_j − v_rest))
+     *   ē_ij ← λ·ē_ij + pre_spike_i（截断到 trace_clamp）
+     *   Δw_ij = lr · L_post · z_post · ē_ij（仅在后突触发放的 tick 施加），ADAM 一阶/二阶矩
+     * eprop_mode=0 时整段跳过 → 旧路径逐位不变 */
+    if (net->hp.eprop_mode && net->use_reward_modulation) {
+        /* use_reward_modulation 是 host 的「学习开关」（评估段置 0）⇒ e-prop 也在此冻结，
+         * 与 R-STDP 的评测语义保持一致 */
+        const int m1b = net->input_count + net->hidden_count;
+        const int m2b = m1b + net->motor1_count;
+        const int ntot = net->neuron_count;
+        double e1 = clamp2(net->cf_omega1_star - omega1_cmd, -1.0, 1.0);
+        double e2 = clamp2(net->cf_omega2_star - omega2_cmd, -1.0, 1.0);
+
+        /* 1) 伪导数已在发放判定处（重置之前）写入 ep_z[]，此处不再重算。
+         *    非发放神经元的 ep_z 值不参与更新（更新只对 post->is_spiking 施加）。 */
+
+        /* 2) 学习信号：输出层 = 任务误差 × 该运动神经元对指令的**有符号**贡献。
+         *    解码为 ω = (1/K)·Σ_{winners} pref_i ⇒ ∂ω/∂s_i = pref_i/K，
+         *    故 err_i = e·pref_i（省去常数 1/K，ADAM 归一化后不影响方向）。
+         *    早期实现把 e1 一律赋给 ω1 群**全体**（含 pref<0 的另一半），
+         *    等于要求"正负两个池同时加强"⇒ 净指令不动、只把总活动压向 0：
+         *    实测 corr_main≈0、sign_acc≈0.49（掷硬币），见 audit/m4_eprop_report §6。 */
+        for (i = 0; i < ntot; i++) net->ep_L[i] = 0.0;
+        for (i = m1b; i < m2b; i++)  net->ep_L[i] = e1 * net->neurons[i].pref_omega;
+        for (i = m2b; i < ntot; i++) net->ep_L[i] = e2 * net->neurons[i].pref_omega;
+        for (s = 0; s < net->synapse_count; s++) {
+            Synapse2* sy = &net->synapses[s];
+            int po = sy->post_id;
+            if (po < m1b) continue;                       /* 只从运动层往回传 */
+            net->ep_L[sy->pre_id] += sy->weight * net->ep_L[po];   /* 对称反馈：真实输出权重 */
+        }
+
+        /* 3) 前突触滤波迹 + 逐突触 ADAM */
+        net->ep_step++;
+        {
+            double b1 = net->hp.eprop_beta1, b2 = net->hp.eprop_beta2;
+            double c1 = 1.0 - pow(b1, (double)net->ep_step);
+            double c2 = 1.0 - pow(b2, (double)net->ep_step);
+            double lr = net->hp.eprop_lr, eps = net->hp.eprop_eps;
+            double lam = net->hp.lambda_trace * 0.95;   /* 迹的 tick 衰减 */
+            double tc = net->hp.trace_clamp;
+            int scope_im_only = (net->hp.eprop_scope == 1);
+            /* 资格迹 = Σ_{t'≤t} λ^{t−t'}·z_post(t')·ē_pre(t')，**每 tick 更新并施加一次 ADAM**。
+             * 早期实现把 ADAM 放在"后突触发放的那一 tick"，等价于每 tick 数千次步进，
+             * lr=1e-3 时 80 ep 内 H→H 99.94% 顶到 10（发散）；
+             * 证据与「运动层确已更新」的验证见 audit/m4_eprop_report_2026-11-17.md；
+             * 按 e-prop 的连续时间形式改为逐 tick 单步，步长与 tick 数线性对应。 */
+            for (s = 0; s < net->synapse_count; s++) {
+                Synapse2* sy = &net->synapses[s];
+                Neuron2* pre = &net->neurons[sy->pre_id];
+                Neuron2* post = &net->neurons[sy->post_id];
+                sy->eligibility_trace *= lam;
+                if (pre->is_spiking && post->is_spiking) {
+                    sy->eligibility_trace += net->ep_z[sy->post_id];
+                }
+                if (tc > 0.0) {
+                    if (sy->eligibility_trace >  tc) sy->eligibility_trace =  tc;
+                    if (sy->eligibility_trace < -tc) sy->eligibility_trace = -tc;
+                }
+                if (scope_im_only) {
+                    int pre_in = (pre->type == NT_INPUT_X || pre->type == NT_INPUT_PROP);
+                    int post_m = (post->type == NT_MOTOR_OMEGA1 || post->type == NT_MOTOR_OMEGA2);
+                    if (!(pre_in && post_m)) continue;
+                }
+                double ct = sy->eligibility_trace;
+                if (ct > -1e-9 && ct < 1e-9) continue;   /* 迹近零 → 本 tick 无梯度 */
+                double g = net->ep_L[sy->post_id] * ct;
+                if (g == 0.0) continue;
+                double m = b1 * net->ep_m[s] + (1.0 - b1) * g;
+                double v = b2 * net->ep_v[s] + (1.0 - b2) * g * g;
+                net->ep_m[s] = m;
+                net->ep_v[s] = v;
+                double dw = lr * (m / c1) / (sqrt(v / c2) + eps);
+                sy->weight = clamp2(sy->weight + dw, WEIGHT_MIN, WEIGHT_MAX);
+            }
+        }
     }
 
     /* reward queue 已移到 tick 开头处理（修正了 1 tick 的时序错位） */
@@ -1327,6 +1437,28 @@ int net2_set_param(NetworkState2* net, const char* name, double value) {
     } else if (b2_param_is(name, "motor_base_current")) {
         if (value < 0.0 || value > 50.0) return -1;
         hp->motor_base_current = value;
+    } else if (b2_param_is(name, "eprop_mode")) {
+        /* v17（M4）：0=旧 R-STDP（默认） 1=symmetric e-prop */
+        if (value < 0.0 || value > 1.0) return -1;
+        hp->eprop_mode = (value >= 0.5) ? 1 : 0;
+        if (hp->eprop_mode) {  /* 切到 e-prop 时清空 ADAM 状态与迹 */
+            int i;
+            for (i = 0; i < net->synapse_count; i++) {
+                net->ep_m[i] = 0.0; net->ep_v[i] = 0.0;
+                net->synapses[i].eligibility_trace = 0.0;
+            }
+            for (i = 0; i < net->neuron_count; i++) { net->ep_L[i] = 0.0; net->ep_z[i] = 0.0; }
+            net->ep_step = 0;
+        }
+    } else if (b2_param_is(name, "eprop_scope")) {
+        if (value < 0.0 || value > 1.0) return -1;
+        hp->eprop_scope = (value >= 0.5) ? 1 : 0;   /* 1 = 仅 I→M（消融臂） */
+    } else if (b2_param_is(name, "eprop_alpha")) {
+        if (value <= 0.0 || value > 5.0) return -1;
+        hp->eprop_alpha = value;
+    } else if (b2_param_is(name, "eprop_lr")) {
+        if (value <= 0.0 || value > 1.0) return -1;
+        hp->eprop_lr = value;
     } else {
         return -1;
     }
@@ -1349,6 +1481,10 @@ double net2_get_param(const NetworkState2* net, const char* name) {
     B2_GET("psp_factor", hp->psp_factor);
     B2_GET("hidden_base_current", hp->hidden_base_current);
     B2_GET("motor_base_current", hp->motor_base_current);
+    B2_GET("eprop_mode", (double)hp->eprop_mode);
+    B2_GET("eprop_scope", (double)hp->eprop_scope);
+    B2_GET("eprop_alpha", hp->eprop_alpha);
+    B2_GET("eprop_lr", hp->eprop_lr);
     B2_GET("trace_clamp", hp->trace_clamp);
     B2_GET("decode_mode", hp->decode_mode);
     B2_GET("wta_k", hp->wta_k);
@@ -1430,6 +1566,48 @@ void net2_scale_weights(NetworkState2* net, double s) {
         if (w > WEIGHT_MAX) w = WEIGHT_MAX;
         net->synapses[i].weight = w;
     }
+}
+
+/* v16：权重导出（文本，17 位有效数字，可逐位回环） */
+int net2_export_weights(NetworkState2* net, const char* path) {
+    FILE* f;
+    int i;
+    if (!net || !path) return -1;
+    f = fopen(path, "w");
+    if (!f) return -1;
+    fprintf(f, "# B2W 1 %d %d\n", net->neuron_count, net->synapse_count);
+    for (i = 0; i < net->synapse_count; i++) {
+        fprintf(f, "%d %d %.17g\n", net->synapses[i].pre_id,
+                net->synapses[i].post_id, net->synapses[i].weight);
+    }
+    if (fclose(f) != 0) return -1;
+    return 0;
+}
+
+/* v16：权重导入（校验规模；失败不动现有权重） */
+int net2_import_weights(NetworkState2* net, const char* path) {
+    FILE* f;
+    char line[256];
+    int i, tag, ver, nn = -1, ns = -1;
+    if (!net || !path) return -1;
+    f = fopen(path, "r");
+    if (!f) return -1;
+    if (!fgets(line, sizeof(line), f)) { fclose(f); return -1; }
+    /* 首行固定为 "# B2W <ver> <neurons> <synapses>" */
+    if (sscanf(line, "# B2W %d %d %d", &ver, &nn, &ns) != 3) { fclose(f); return -1; }
+    (void)tag;
+    if (ver != 1) { fclose(f); return -1; }
+    if (nn != net->neuron_count || ns != net->synapse_count) { fclose(f); return -1; }
+    for (i = 0; i < net->synapse_count; i++) {
+        int pre = 0, post = 0;
+        double w = 0.0;
+        if (!fgets(line, sizeof(line), f)) { fclose(f); return -1; }
+        if (sscanf(line, "%d %d %lf", &pre, &post, &w) != 3) { fclose(f); return -1; }
+        if (pre != net->synapses[i].pre_id || post != net->synapses[i].post_id) { fclose(f); return -1; }
+        net->synapses[i].weight = w;
+    }
+    fclose(f);
+    return 0;
 }
 
 /* JSON 拓扑（一次性，初始化后调用） */

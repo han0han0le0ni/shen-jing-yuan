@@ -46,6 +46,21 @@ struct B2Config {
      * weight_scale = 初始化后全部权重整体乘子（默认 1.0 = 不调用 net2_scale_weights） */
     double lr_scale     = 1.0;
     double weight_scale = 1.0;
+
+    /* v16（工具缺口，2026-11-17 负责人「可以」）：
+     * save/load 权重 + 逐 tick 命令导出；三者默认空/关闭 → 旧行为逐位不变 */
+    std::string save_weights;   /* 训练结束后导出权重的路径 */
+    std::string save_init_weights; /* 初始化后、任何 tick 之前导出（作为 Δ 统计的基线） */
+    std::string load_weights;   /* 初始化后导入权重（规模不符则报错退出） */
+    std::string trace_cmd;      /* 逐 tick 命令 JSONL（ep,t,target,end,theta,om,om*,cf_err） */
+    int trace_stride = 5;       /* 命令导出采样间隔（tick） */
+
+    /* v17（M4，负责人 2026-11-17「签字」）：symmetric e-prop。
+     * 默认 eprop=0 ⇒ 旧 R-STDP 路径逐位不变；开启后 R-STDP/误差通道整体关闭。 */
+    int    eprop       = 0;      /* 0=旧规则 1=e-prop */
+    int    eprop_scope = 0;      /* 0=全通路 1=仅 I→M（消融臂 D） */
+    double eprop_alpha = 0.3;    /* 伪导数斜率 */
+    double eprop_lr    = 1e-3;   /* ADAM 步长（P3 由单 seed 校准后写死） */
     double trace_clamp = 1.0;
     double tau_trace = 2000.0;
     int decode_mode = 0;          /* 0=WTA 均值, 2=膜电位加权 */
@@ -207,6 +222,16 @@ int main(int argc, char* argv[]) {
         else if (a == "--motor-base")   nextf(cfg.motor_base);
         else if (a == "--lr-scale")     nextf(cfg.lr_scale);
         else if (a == "--weight-scale") nextf(cfg.weight_scale);
+        else if (a == "--save-weights")  { if (i+1<argc) cfg.save_weights = argv[++i]; }
+        else if (a == "--save-init-weights") { if (i+1<argc) cfg.save_init_weights = argv[++i]; }
+        else if (a == "--load-weights")  { if (i+1<argc) cfg.load_weights = argv[++i]; }
+        else if (a == "--trace-cmd")     { if (i+1<argc) cfg.trace_cmd = argv[++i]; }
+        else if (a == "--trace-stride")  next(cfg.trace_stride);
+        else if (a == "--eprop")         cfg.eprop = 1;
+        else if (a == "--eprop-scope")   { std::string m = (i+1<argc) ? argv[++i] : "";
+                                           cfg.eprop_scope = (m == "im" || m == "I-M" || m == "i2m") ? 1 : 0; }
+        else if (a == "--eprop-alpha")   nextf(cfg.eprop_alpha);
+        else if (a == "--eprop-lr")      nextf(cfg.eprop_lr);
         else if (a == "--trace-clamp")  nextf(cfg.trace_clamp);
         else if (a == "--tau-trace")    nextf(cfg.tau_trace);
         else if (a == "--wta-k")        next(cfg.wta_k);
@@ -263,6 +288,8 @@ int main(int argc, char* argv[]) {
                    "       [--psp F --wta-k K --decode-mode wta|weighted --reward-mode combo1|potential]\n"
                    "       [--hidden-base F --motor-base F]   (内在基电流 mV/tick，默认 2.0 / 3.0)\n"
                    "       [--lr-scale F --weight-scale F]  (学习增益 / 权重映射增益，默认 1.0)\n"
+                   "       [--save-weights P --save-init-weights P --load-weights P --trace-cmd P [--trace-stride N]]\n"
+                   "       [--eprop [--eprop-scope all|im] [--eprop-alpha F] [--eprop-lr F]]\n"
                    "       [--no-reward-baseline --tau-trace F --trace-clamp F]\n"
                    "       [--speed-reward (默认：每步成本 + 首达奖励 + 碰到即结算重来)]\n"
                    "       [--no-speed-reward (旧对照：固定步数、不结算)]\n"
@@ -344,21 +371,45 @@ int main(int argc, char* argv[]) {
     net.hp.psp_factor = cfg.psp_factor;
     net.hp.hidden_base_current = cfg.hidden_base;
     net.hp.motor_base_current  = cfg.motor_base;
+    /* v17（M4）：e-prop 开关（默认 0，旧路径逐位不变） */
+    net.hp.eprop_mode  = cfg.eprop;
+    net.hp.eprop_scope = cfg.eprop_scope;
+    net.hp.eprop_alpha = cfg.eprop_alpha;
+    net.hp.eprop_lr    = cfg.eprop_lr;
     net.hp.trace_clamp = cfg.trace_clamp;
     net.hp.tau_trace = cfg.tau_trace;
     net.hp.lambda_trace = exp(-1.0 / cfg.tau_trace);
     net.hp.decode_mode = cfg.decode_mode;
     net.hp.wta_k = cfg.wta_k;
     net.hp.use_reward_baseline = cfg.use_reward_baseline;
+    /* v16：导入权重（必须在任何 tick 之前；weight_scale 仍会在其后生效） */
+    if (!cfg.load_weights.empty()) {
+        if (net2_import_weights(&net, cfg.load_weights.c_str()) != 0) {
+            fprintf(stderr, "Cannot load weights from %s (bad format or size mismatch: need %d neurons / %d synapses)\n",
+                    cfg.load_weights.c_str(), net.neuron_count, net.synapse_count);
+            net2_destroy(&net);
+            return 1;
+        }
+        printf("Weights: loaded from %s (%d synapses)\n", cfg.load_weights.c_str(), net.synapse_count);
+    }
     /* v15（M3）：整体权重缩放，必须早于任何 tick；默认 1.0 时完全不调用 */
     if (cfg.weight_scale != 1.0) {
         net2_scale_weights(&net, cfg.weight_scale);
     }
+    /* v16：初始权重导出（在 load / weight_scale 之后，任何 tick 之前） */
+    if (!cfg.save_init_weights.empty()) {
+        if (net2_export_weights(&net, cfg.save_init_weights.c_str()) == 0)
+            printf("Weights: init saved to %s (%d synapses)\n",
+                   cfg.save_init_weights.c_str(), net.synapse_count);
+        else
+            fprintf(stderr, "Cannot save init weights to %s\n", cfg.save_init_weights.c_str());
+    }
     printf("Mode: preset=%s psp=%.2f wta_k=%d decode=%d reward=%d baseline=%d tau=%.0f clamp=%.2f"
-           " hb=%.2f mb=%.2f lrs=%.3f ws=%.4f\n",
+           " hb=%.2f mb=%.2f lrs=%.3f ws=%.4f ep=%d ep_scope=%d ep_lr=%.5f\n",
            cfg.preset.c_str(), cfg.psp_factor, cfg.wta_k, cfg.decode_mode,
            cfg.reward_mode, cfg.use_reward_baseline, cfg.tau_trace, cfg.trace_clamp,
-           cfg.hidden_base, cfg.motor_base, cfg.lr_scale, cfg.weight_scale);
+           cfg.hidden_base, cfg.motor_base, cfg.lr_scale, cfg.weight_scale,
+           cfg.eprop, cfg.eprop_scope, cfg.eprop_lr);
 
     /* v6：三因子调制通道与运动层异质化。走 set_param 以便复用边界校验，
      * 并让 hetero_* 立即重建运动层的异质分布。默认值全 0 = 旧版行为。 */
@@ -435,6 +486,13 @@ int main(int argc, char* argv[]) {
         int hdr[3] = { 0x42325432, dump_width, cfg.stride };
         fwrite(hdr, sizeof(int), 3, dh);
     }
+    /* v16：逐 tick 命令导出（JSONL），默认关闭 */
+    FILE* tc = NULL;
+    if (!cfg.trace_cmd.empty()) {
+        tc = fopen(cfg.trace_cmd.c_str(), "w");
+        if (!tc) { fprintf(stderr, "Cannot open %s\n", cfg.trace_cmd.c_str()); net2_destroy(&net); return 1; }
+        fprintf(tc, "{\"header\":\"b2_cmd_trace\",\"stride\":%d}\n", cfg.trace_stride);
+    }
     
     FILE* fp = fopen(cfg.out_csv.c_str(), "w");
     if (!fp) { net2_destroy(&net); fprintf(stderr, "Cannot open %s\n", cfg.out_csv.c_str()); return 1; }
@@ -474,6 +532,10 @@ int main(int argc, char* argv[]) {
                 cfg.hidden_base, cfg.motor_base);
         fprintf(mf, "  \"lr_scale\": %.4f, \"weight_scale\": %.4f,\n",
                 cfg.lr_scale, cfg.weight_scale);
+        fprintf(mf, "  \"save_weights\": \"%s\", \"load_weights\": \"%s\", \"trace_cmd\": \"%s\", \"trace_stride\": %d,\n",
+                cfg.save_weights.c_str(), cfg.load_weights.c_str(), cfg.trace_cmd.c_str(), cfg.trace_stride);
+        fprintf(mf, "  \"eprop\": %d, \"eprop_scope\": %d, \"eprop_alpha\": %.4f, \"eprop_lr\": %.6f,\n",
+                cfg.eprop, cfg.eprop_scope, cfg.eprop_alpha, cfg.eprop_lr);
         fprintf(mf, "  \"preset\": \"%s\", \"decode_mode\": %d, \"wta_k\": %d, \"reward_mode\": %d,\n",
                 cfg.preset.c_str(), cfg.decode_mode, cfg.wta_k, cfg.reward_mode);
         fprintf(mf, "  \"use_reward_baseline\": %d, \"tau_trace\": %.1f, \"trace_clamp\": %.2f,\n",
@@ -640,6 +702,15 @@ int main(int argc, char* argv[]) {
                                    net.arm.end_y, (double)ep };
                 fwrite(meta, sizeof(double), 8, dh);
             }
+            /* v16：命令轨迹（解码指令 vs 解析期望指令 vs 攀爬纤维误差） */
+            if (tc && (t % cfg.trace_stride == 0)) {
+                fprintf(tc, "{\"ep\":%d,\"t\":%d,\"tx\":%.4f,\"ty\":%.4f,\"ex\":%.4f,\"ey\":%.4f,"
+                            "\"th1\":%.4f,\"th2\":%.4f,\"om1\":%.4f,\"om2\":%.4f,"
+                            "\"w1s\":%.4f,\"w2s\":%.4f,\"e1\":%.4f,\"e2\":%.4f}\n",
+                        ep, t, net.arm.target_x, net.arm.target_y, net.arm.end_x, net.arm.end_y,
+                        net.arm.theta1, net.arm.theta2, net.decoded_omega1, net.decoded_omega2,
+                        net.cf_omega1_star, net.cf_omega2_star, net.cf_err1, net.cf_err2);
+            }
 
             /* 碰到目标即结束本轮：先多跑 1 tick 消费刚注入的 bonus（reward 队列
              * 在下一 tick 开头才处理），否则下个 episode 开头 queue 清零会丢掉奖励。 */
@@ -696,6 +767,14 @@ int main(int argc, char* argv[]) {
     
     fclose(fp);
     if (dh) fclose(dh);
+    if (tc) fclose(tc);
+    /* v16：训练结束导出权重（供 wdump_stats.py 统计 I→H / H→H / H→M / I→M 分布） */
+    if (!cfg.save_weights.empty()) {
+        if (net2_export_weights(&net, cfg.save_weights.c_str()) == 0)
+            printf("Weights: saved to %s (%d synapses)\n", cfg.save_weights.c_str(), net.synapse_count);
+        else
+            fprintf(stderr, "Cannot save weights to %s\n", cfg.save_weights.c_str());
+    }
     
     /* 统计 */
     std::vector<double> ratios;
