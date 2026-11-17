@@ -1,0 +1,493 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>shen-jing-yuan · 一团自己玩出来的神经元</title>
+<meta name="description" content="一个零编程基础的人，出于好奇，用 AI 做出来的脉冲神经网络模拟实验仓库。">
+<style>
+  :root{
+    --bg:#141413; --bg2:#1c1b19; --panel:#201f1d;
+    --ink:#faf9f5; --ink2:#b0aea5; --ink3:#8a877e;
+    --line:rgba(250,249,245,.09);
+    --acc:#d97757; --acc2:#6a9bcc; --acc3:#788c5d;
+    --radius:22px;
+    --font-head:"Outfit","PingFang SC","Microsoft YaHei",sans-serif;
+    --font-mono:"Cascadia Code",Consolas,monospace;
+  }
+  *{margin:0;padding:0;box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{background:var(--bg);color:var(--ink);font-family:var(--font-head);font-size:16px;line-height:1.75;-webkit-font-smoothing:antialiased;overflow-x:hidden}
+  ::selection{background:var(--acc);color:#141413}
+  .wrap{max-width:1200px;margin:0 auto;padding:0 28px}
+  section{padding:104px 0}
+  .kicker{display:inline-flex;align-items:center;gap:10px;font-size:12px;letter-spacing:.22em;text-transform:uppercase;color:var(--acc);font-weight:600}
+  .kicker::before{content:"";width:26px;height:1px;background:var(--acc)}
+  h2{font-size:clamp(30px,4.2vw,46px);font-weight:700;letter-spacing:-.02em;line-height:1.15;margin:16px 0 14px}
+  .lead{color:var(--ink2);max-width:62ch;font-size:17px}
+  .reveal{opacity:0;transform:translateY(26px);transition:opacity .8s cubic-bezier(.16,1,.3,1),transform .8s cubic-bezier(.16,1,.3,1)}
+  .reveal.in{opacity:1;transform:none}
+  code.inline{font-family:var(--font-mono);font-size:13.5px;background:rgba(250,249,245,.07);padding:2px 8px;border-radius:6px}
+
+  nav{position:fixed;top:0;left:0;right:0;z-index:50;backdrop-filter:blur(14px);background:rgba(20,20,19,.72);border-bottom:1px solid var(--line)}
+  .nav-inner{max-width:1200px;margin:0 auto;padding:13px 28px;display:flex;align-items:center;justify-content:space-between}
+  .brand{display:flex;align-items:center;gap:10px;font-weight:700;font-size:17px;text-decoration:none;color:var(--ink)}
+  .brand .dot{width:9px;height:9px;border-radius:50%;background:var(--acc);box-shadow:0 0 0 0 rgba(217,119,87,.6);animation:pulse 2.4s infinite}
+  @keyframes pulse{0%{box-shadow:0 0 0 0 rgba(217,119,87,.55)}70%{box-shadow:0 0 0 12px rgba(217,119,87,0)}100%{box-shadow:0 0 0 0 rgba(217,119,87,0)}}
+  .nav-links{display:flex;gap:26px;align-items:center}
+  .nav-links a{color:var(--ink2);text-decoration:none;font-size:14px;transition:color .2s}
+  .nav-links a:hover{color:var(--ink)}
+  .nav-cta{background:var(--acc);color:#141413;padding:8px 18px;border-radius:99px;font-weight:600}
+  .nav-cta:hover{background:#e58a6b;color:#141413}
+  @media(max-width:760px){.nav-links a:not(.nav-cta){display:none}}
+
+  .hero{position:relative;min-height:100dvh;display:flex;align-items:center;padding:120px 0 90px;overflow:hidden}
+  #net{position:absolute;inset:0;width:100%;height:100%}
+  .hero .wrap{position:relative;z-index:2;display:grid;grid-template-columns:1.1fr .9fr;gap:56px;align-items:center;width:100%}
+  @media(max-width:900px){.hero .wrap{grid-template-columns:1fr;gap:40px}}
+  .repo-pill{display:inline-flex;align-items:center;gap:10px;padding:8px 16px;border-radius:99px;border:1px solid var(--line);background:rgba(250,249,245,.04);font-size:13px;color:var(--ink2);text-decoration:none;transition:border-color .2s,color .2s}
+  .repo-pill:hover{border-color:rgba(217,119,87,.5);color:var(--ink)}
+  .repo-pill svg{width:15px;height:15px;fill:currentColor;flex:none}
+  h1{font-weight:800;font-size:clamp(44px,7vw,82px);line-height:1.05;letter-spacing:-.035em;margin:26px 0 8px}
+  h1 .cn{display:block;font-size:.5em;font-weight:600;letter-spacing:.1em;color:var(--ink2);margin-top:14px}
+  h1 .glow{color:var(--acc)}
+  .hero-sub{color:var(--ink2);font-size:17.5px;max-width:56ch;margin:20px 0 32px}
+  .hero-sub b{color:var(--ink);font-weight:600}
+  .hero-actions{display:flex;gap:14px;flex-wrap:wrap}
+  .btn{display:inline-flex;align-items:center;gap:9px;padding:13px 25px;border-radius:99px;font-weight:600;font-size:15px;text-decoration:none;transition:transform .15s,background .2s,border-color .2s}
+  .btn:active{transform:scale(.97)}
+  .btn-primary{background:var(--acc);color:#141413}
+  .btn-primary:hover{background:#e58a6b}
+  .btn-ghost{border:1px solid var(--line);color:var(--ink)}
+  .btn-ghost:hover{border-color:rgba(250,249,245,.3)}
+  .btn svg{width:16px;height:16px;fill:currentColor}
+  .hero-card{border:1px solid var(--line);border-radius:var(--radius);background:linear-gradient(160deg,rgba(250,249,245,.05),rgba(250,249,245,.015));padding:24px;box-shadow:inset 0 1px 0 rgba(255,255,255,.06);font-family:var(--font-mono);font-size:13px;line-height:1.9;color:var(--ink2)}
+  .hero-card .bar{display:flex;gap:7px;margin-bottom:15px}
+  .hero-card .bar i{width:10px;height:10px;border-radius:50%}
+  .hero-card .c1{background:#e0655a}.hero-card .c2{background:#e0b04e}.hero-card .c3{background:#7fb069}
+  .hero-card .k{color:var(--acc2)}.hero-card .s{color:var(--ink3)}.hero-card .ok{color:var(--acc)}
+  .scroll-hint{position:absolute;left:50%;bottom:24px;transform:translateX(-50%);color:var(--ink3);font-size:11px;letter-spacing:.24em;z-index:2}
+  .scroll-hint::after{content:"";display:block;width:1px;height:34px;margin:8px auto 0;background:linear-gradient(var(--ink3),transparent);animation:drip 1.8s infinite}
+  @keyframes drip{0%{transform:scaleY(0);transform-origin:top}55%{transform:scaleY(1);transform-origin:top}56%{transform-origin:bottom}100%{transform:scaleY(0);transform-origin:bottom}}
+
+  .truth{background:var(--bg2);border-block:1px solid var(--line)}
+  .truth-grid{display:grid;grid-template-columns:1fr 1fr;gap:52px;align-items:center}
+  @media(max-width:880px){.truth-grid{grid-template-columns:1fr;gap:34px}}
+  .truth blockquote{border-left:3px solid var(--acc);padding:6px 0 6px 26px;margin-top:26px;font-size:clamp(21px,2.6vw,27px);font-weight:600;line-height:1.5;letter-spacing:-.01em}
+  .truth blockquote em{font-style:normal;color:var(--acc)}
+  .truth-side{display:flex;flex-direction:column;gap:14px}
+  .truth-item{display:flex;gap:14px;padding:17px 20px;border:1px solid var(--line);border-radius:16px;background:rgba(250,249,245,.02)}
+  .truth-item .num{font-family:var(--font-mono);color:var(--acc);font-weight:700;flex:none;padding-top:2px}
+  .truth-item h4{font-size:15.5px;font-weight:600;margin-bottom:3px}
+  .truth-item p{font-size:14px;color:var(--ink2)}
+
+  .exp{display:grid;grid-template-columns:1fr 1fr;gap:26px;margin-top:46px}
+  @media(max-width:880px){.exp{grid-template-columns:1fr}}
+  .exp-card{position:relative;border:1px solid var(--line);border-radius:var(--radius);background:var(--panel);padding:32px;transition:transform .35s cubic-bezier(.16,1,.3,1),border-color .3s}
+  .exp-card:hover{transform:translateY(-6px);border-color:rgba(217,119,87,.4)}
+  .exp-card .tag{position:absolute;top:0;right:0;background:rgba(217,119,87,.12);color:var(--acc);font-family:var(--font-mono);font-size:12px;padding:8px 16px;border-bottom-left-radius:14px;font-weight:600}
+  .exp-card h3{font-size:22px;font-weight:700;margin:12px 0 10px;letter-spacing:-.01em}
+  .exp-card p{color:var(--ink2);font-size:15px}
+  .exp-card ul{list-style:none;margin-top:16px;display:flex;flex-direction:column;gap:9px}
+  .exp-card li{display:flex;gap:10px;font-size:14px;color:var(--ink2)}
+  .exp-card li::before{content:"›";color:var(--acc);font-weight:700;flex:none}
+  .exp-card .result{margin-top:20px;padding:13px 17px;border-radius:14px;background:rgba(120,140,93,.12);border:1px solid rgba(120,140,93,.3);font-size:13.5px;color:#c9d6b8}
+  .exp-card .result b{color:var(--acc3)}
+  .exp-card.orange:hover{border-color:rgba(106,155,204,.4)}
+  .exp-card.orange .tag{background:rgba(106,155,204,.12);color:var(--acc2)}
+  .exp-card.orange li::before{color:var(--acc2)}
+
+  .stats{background:var(--bg2);border-block:1px solid var(--line)}
+  .stat-grid{display:grid;grid-template-columns:repeat(6,1fr);gap:1px;background:var(--line);border:1px solid var(--line);border-radius:var(--radius);overflow:hidden;margin-top:44px}
+  @media(max-width:980px){.stat-grid{grid-template-columns:repeat(3,1fr)}}
+  @media(max-width:560px){.stat-grid{grid-template-columns:repeat(2,1fr)}}
+  .stat{background:var(--bg2);padding:28px 16px;text-align:center;transition:background .3s}
+  .stat:hover{background:var(--panel)}
+  .stat .v{font-size:clamp(25px,3vw,36px);font-weight:800;letter-spacing:-.02em}
+  .stat .l{font-size:12.5px;color:var(--ink3);margin-top:6px;letter-spacing:.06em}
+
+  .tl{position:relative;margin-top:52px;padding-left:34px}
+  .tl::before{content:"";position:absolute;left:8px;top:6px;bottom:6px;width:2px;background:linear-gradient(var(--acc),rgba(217,119,87,.15))}
+  .tl-item{position:relative;padding-bottom:40px}
+  .tl-item:last-child{padding-bottom:0}
+  .tl-item::before{content:"";position:absolute;left:-33px;top:7px;width:12px;height:12px;border-radius:50%;background:var(--bg);border:3px solid var(--acc);box-shadow:0 0 0 4px rgba(217,119,87,.12)}
+  .tl-item .ph{font-family:var(--font-mono);font-size:12px;color:var(--acc);letter-spacing:.14em;text-transform:uppercase}
+  .tl-item h3{font-size:20px;font-weight:700;margin:7px 0 6px}
+  .tl-item p{color:var(--ink2);font-size:15px;max-width:64ch}
+  .tl-item p b{color:var(--ink);font-weight:600}
+
+  .stack{display:flex;flex-wrap:wrap;gap:12px;margin-top:38px}
+  .chip{padding:10px 20px;border-radius:99px;border:1px solid var(--line);font-size:14px;color:var(--ink2);background:rgba(250,249,245,.03);transition:all .25s}
+  .chip:hover{color:var(--ink);border-color:rgba(217,119,87,.45);transform:translateY(-2px)}
+  .chip b{color:var(--acc);font-weight:600}
+
+  .cta{position:relative;text-align:center;padding:126px 0 116px;overflow:hidden}
+  .cta h2{font-size:clamp(32px,4.6vw,52px)}
+  .cta .lead{margin:0 auto 36px}
+  .cta .glowline{position:absolute;left:50%;top:0;transform:translateX(-50%);width:60%;height:1px;background:linear-gradient(90deg,transparent,rgba(217,119,87,.7),transparent)}
+
+  footer{border-top:1px solid var(--line);padding:32px 0;color:var(--ink3);font-size:13px}
+  .foot{display:flex;justify-content:space-between;align-items:center;gap:16px;flex-wrap:wrap}
+  footer a{color:var(--ink2);text-decoration:none}
+  footer a:hover{color:var(--acc)}
+
+  @media(prefers-reduced-motion:reduce){
+    *,*::before,*::after{animation-duration:.01ms!important;animation-iteration-count:1!important;transition-duration:.01ms!important}
+    html{scroll-behavior:auto}.reveal{opacity:1;transform:none}
+  }
+</style>
+</head>
+<body>
+
+<nav>
+  <div class="nav-inner">
+    <a class="brand" href="#top"><span class="dot"></span>shen-jing-yuan</a>
+    <div class="nav-links">
+      <a href="#truth">这是啥</a>
+      <a href="#exp">两个实验</a>
+      <a href="#journey">旅程</a>
+      <a class="nav-cta" href="https://github.com/han0han0le0ni/shen-jing-yuan" target="_blank" rel="noopener">GitHub ↗</a>
+    </div>
+  </div>
+</nav>
+
+<!-- ================= HERO ================= -->
+<header class="hero" id="top">
+  <canvas id="net" aria-hidden="true"></canvas>
+  <div class="wrap">
+    <div>
+      <a class="repo-pill" href="https://github.com/han0han0le0ni/shen-jing-yuan" target="_blank" rel="noopener">
+        <svg viewBox="0 0 16 16"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>
+        han0han0le0ni / shen-jing-yuan · 49 commits
+      </a>
+      <h1>I made a <span class="glow">brain</span><span class="cn">一团自己玩出来的神经元模拟实验</span></h1>
+      <p class="hero-sub">
+        这个仓库里没有任何一行代码是我亲手写的——<b>我不会编程</b>。
+        它完全诞生于一个念头，加上我和 AI 一句一句的来回。
+        每一个实验、每一次失败、每一个被修好的 bug，都是<b>好奇心</b>驱动出来的。
+      </p>
+      <div class="hero-actions">
+        <a class="btn btn-primary" href="https://github.com/han0han0le0ni/shen-jing-yuan" target="_blank" rel="noopener">
+          <svg viewBox="0 0 16 16"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>
+          去仓库看看
+        </a>
+        <a class="btn btn-ghost" href="#truth">先说清楚这是啥</a>
+      </div>
+    </div>
+    <div class="hero-card" aria-hidden="true">
+      <div class="bar"><i class="c1"></i><i class="c2"></i><i class="c3"></i></div>
+      <div><span class="k">$</span> 问问这个仓库是什么</div>
+      <div>&gt; 一个不会编程的人，</div>
+      <div>&gt; 出于对大脑的好奇，</div>
+      <div>&gt; 用 AI 搭的脉冲神经网络实验场。</div>
+      <div>&nbsp;</div>
+      <div><span class="k">neurons</span> = <span class="ok">2256</span> <span class="s">// 模拟神经元</span></div>
+      <div><span class="k">synapses</span> = <span class="ok">44401</span> <span class="s">// 模拟突触</span></div>
+      <div><span class="k">episodes</span> = <span class="ok">60000+</span> <span class="s">// 跑过的训练</span></div>
+      <div><span class="k">coding_skill</span> = <span class="ok">0</span> <span class="s">// 哈哈</span></div>
+      <div><span class="k">curiosity</span> = <span class="ok">∞</span></div>
+    </div>
+  </div>
+  <div class="scroll-hint">SCROLL</div>
+</header>
+
+<!-- ================= 坦白 ================= -->
+<section class="truth" id="truth">
+  <div class="wrap truth-grid">
+    <div class="reveal">
+      <span class="kicker">坦白从宽</span>
+      <h2>先说清楚：这是谁做的，怎么做的</h2>
+      <p class="lead">
+        我不是程序员，没系统学过代码，也看不懂神经网络的数学公式。
+        这个项目从头到尾都是我用 AI 对话做出来的：我负责<b style="color:var(--ink)">提想法、下判断、看结果</b>，
+        AI 负责把想法变成代码。仓库描述里那句「自己玩的」，就是这个意思。
+      </p>
+      <blockquote>
+        我唯一提供的，是<em>奇思妙想</em>，<br>和「再试一次」的执拗。
+      </blockquote>
+    </div>
+    <div class="truth-side">
+      <div class="truth-item reveal">
+        <div class="num">01</div>
+        <div>
+          <h4>我提问题，AI 写代码</h4>
+          <p>「能不能让一团神经元学会记住 200 步之前收到的奖励？」——问题是我的，实现是 AI 的。</p>
+        </div>
+      </div>
+      <div class="truth-item reveal">
+        <div class="num">02</div>
+        <div>
+          <h4>我看得懂结果，看不懂代码</h4>
+          <p>CSV 里的曲线、达标率、末端距离——这些我能盯着看半天；至于指针和内存，全权委托 AI 处理。</p>
+        </div>
+      </div>
+      <div class="truth-item reveal">
+        <div class="num">03</div>
+        <div>
+          <h4>过程比结果重要</h4>
+          <p>这个项目至今没有「通关」：机械臂实验还没真正达标。但排查、修复、测试的整个过程，本身就是最好玩的部分。</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 实验 ================= -->
+<section id="exp">
+  <div class="wrap">
+    <div class="reveal">
+      <span class="kicker">仓库里有什么</span>
+      <h2>两个自己给自己出的考题</h2>
+      <p class="lead">
+        核心是 <code class="inline">Experiment</code> 目录：C 语言写的「大脑」，C++ 写的实验台，
+        Python 画的可视化，还有上百个实验留下的数据文件。
+      </p>
+    </div>
+    <div class="exp">
+      <div class="exp-card reveal">
+        <span class="tag">Benchmark-1</span>
+        <h3>跨过 200 步的奖励记忆</h3>
+        <p>一条最简单的神经通路：信号进来，200 个时间步之后奖励才到。网络能不能把「迟到这么久的奖励」正确归因给当初的动作？这是强化学习里最刁钻的问题之一——延迟信用分配。</p>
+        <ul>
+          <li>C 语言核心，脉冲神经网络，资格迹 + 奖励调制三因子学习</li>
+          <li>30 个随机种子重复实验 + 消融对照（关掉奖励再跑一遍）</li>
+          <li>附带 Python 可视化，能看着脉冲在突触上流动</li>
+        </ul>
+        <div class="result"><b>结果：</b>30 个种子全部 100% 通过——网络真的学会了「记账」。</div>
+      </div>
+      <div class="exp-card orange reveal">
+        <span class="tag">Benchmark-2</span>
+        <h3>教一条虚拟机械臂去够目标</h3>
+        <p>两节手臂、两个关节，2256 个模拟神经元靠发放脉冲控制它们转动，目标是把末端送到指定位置。没有反向传播，没有梯度下降，只有「靠近了给甜头、远离了扣分」的原始奖励。</p>
+        <ul>
+          <li>104 次实验、60000+ 个训练回合、142 个数据文件</li>
+          <li>做过全面「体检」：找到并修掉了真实的内存越界 bug</li>
+          <li>31 项自动化测试守护工程质量</li>
+        </ul>
+        <div class="result"><b>进展：</b>长训练下机械臂第一次真的够到了目标——虽然还不稳定。探索仍在继续。</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 数字 ================= -->
+<section class="stats" id="stats">
+  <div class="wrap">
+    <div class="reveal">
+      <span class="kicker">数字会说话</span>
+      <h2>一个「玩」出来的体量</h2>
+    </div>
+    <div class="stat-grid reveal">
+      <div class="stat"><div class="v" data-count="49">0</div><div class="l">Git 提交</div></div>
+      <div class="stat"><div class="v" data-count="2256">0</div><div class="l">模拟神经元</div></div>
+      <div class="stat"><div class="v" data-count="44401">0</div><div class="l">模拟突触</div></div>
+      <div class="stat"><div class="v" data-count="60000" data-plus="+">0</div><div class="l">训练回合</div></div>
+      <div class="stat"><div class="v" data-count="142">0</div><div class="l">实验数据文件</div></div>
+      <div class="stat"><div class="v" data-count="31">0</div><div class="l">自动化测试</div></div>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 旅程 ================= -->
+<section id="journey">
+  <div class="wrap">
+    <div class="reveal">
+      <span class="kicker">这段旅程</span>
+      <h2>从「随便玩玩」到一本正经</h2>
+      <p class="lead">一开始只是想看看代码里的「神经元」长什么样。结果一玩就停不下来了。</p>
+    </div>
+    <div class="tl">
+      <div class="tl-item reveal">
+        <div class="ph">起点 · 好奇</div>
+        <h3>「大脑能不能被简化到一段代码里？」</h3>
+        <p>最初的念头很朴素：真实大脑是一堆神经元互相发信号，那我能不能让<b>一团模拟神经元</b>自己学会完成任务？带着这个问题找到了 AI。</p>
+      </div>
+      <div class="tl-item reveal">
+        <div class="ph">第一步 · 搭建</div>
+        <h3>AI 把想法变成了 C 语言</h3>
+        <p>我描述想要什么，AI 写代码、我跑实验、看数据、再提要求。第一版 Benchmark-1 很快跑通，<b>30 个随机种子全部通过</b>——那一瞬间真的会很兴奋。</p>
+      </div>
+      <div class="tl-item reveal">
+        <div class="ph">升级 · 出考题</div>
+        <h3>给「大脑」装一条机械臂</h3>
+        <p>Benchmark-2 更野心：让 2256 个神经元通过脉冲控制两节机械臂去够目标。这一玩就是<b>104 次实验、六万多个训练回合</b>，数据文件铺满了目录。</p>
+      </div>
+      <div class="tl-item reveal">
+        <div class="ph">体检 · 认真起来</div>
+        <h3>给整个项目做了一次全面检测</h3>
+        <p>让 AI 对代码、构建、数据做全面体检——还真查出了<b>真实的内存越界 bug</b>，复现了崩溃，然后逐项修复：突触容量、参数校验、构建脚本、31 项自动化测试。</p>
+      </div>
+      <div class="tl-item reveal">
+        <div class="ph">此刻 · 仍在路上</div>
+        <h3>机械臂第一次够到了目标</h3>
+        <p>调整解码方式并延长训练后，机械臂末端距离第一次降到 <b>0.074</b>（达标线是 0.141）——虽然 100 次里只成功 1 次，但那一下，整团神经元是真的「懂了」。探索还在继续。</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 技术栈 ================= -->
+<section class="stats">
+  <div class="wrap">
+    <div class="reveal">
+      <span class="kicker">都是 AI 写的</span>
+      <h2>仓库里用到的家伙什</h2>
+      <p class="lead">没有框架，没有云服务，全部本地运行——一台普通电脑就够了。</p>
+    </div>
+    <div class="stack reveal">
+      <span class="chip"><b>C</b> · 神经网络核心</span>
+      <span class="chip"><b>C++</b> · 实验控制台</span>
+      <span class="chip"><b>Python</b> · 可视化与数据分析</span>
+      <span class="chip"><b>ctypes</b> · 跨语言实时联动</span>
+      <span class="chip"><b>PowerShell</b> · 构建脚本</span>
+      <span class="chip"><b>CSV/JSON</b> · 实验数据与元数据</span>
+      <span class="chip"><b>GCC</b> · 编译工具链</span>
+      <span class="chip"><b>Git</b> · 49 次提交</span>
+    </div>
+  </div>
+</section>
+
+<!-- ================= CTA ================= -->
+<section class="cta">
+  <div class="glowline"></div>
+  <div class="wrap">
+    <div class="reveal">
+      <span class="kicker" style="justify-content:center;display:flex">写给同样好奇的人</span>
+      <h2>不会编程，也能做实验</h2>
+      <p class="lead" style="margin-inline:auto">
+        这个仓库证明了一件事：好奇心 + AI + 一点点执拗，就足够让一个外行
+        从零搭起一套「神经元模拟实验系统」。代码不完美，实验没通关，但每一步都好玩。
+      </p>
+      <div class="hero-actions" style="justify-content:center">
+        <a class="btn btn-primary" href="https://github.com/han0han0le0ni/shen-jing-yuan" target="_blank" rel="noopener">
+          <svg viewBox="0 0 16 16"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>
+          访问 GitHub 仓库
+        </a>
+        <a class="btn btn-ghost" href="#top">回到顶部</a>
+      </div>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap foot">
+    <div>shen-jing-yuan · 自己玩的，神经元模拟实验</div>
+    <div><a href="https://github.com/han0han0le0ni" target="_blank" rel="noopener">@han0han0le0ni</a> · 由好奇心与 AI 共同完成</div>
+  </div>
+</footer>
+<script>
+(function(){
+  "use strict";
+  var reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  /* ---------- 神经网络背景 ---------- */
+  var cv = document.getElementById("net");
+  var ctx = cv.getContext("2d");
+  var W, H, nodes = [], spikes = [];
+  var COLORS = ["217,119,87", "106,155,204", "176,174,165"];
+
+  function resize(){
+    W = cv.width = cv.offsetWidth * devicePixelRatio;
+    H = cv.height = cv.offsetHeight * devicePixelRatio;
+    var n = Math.min(70, Math.max(28, Math.round(W * H / 42000 / devicePixelRatio)));
+    nodes = [];
+    for (var i = 0; i < n; i++){
+      nodes.push({
+        x: Math.random() * W, y: Math.random() * H,
+        vx: (Math.random() - .5) * .22 * devicePixelRatio,
+        vy: (Math.random() - .5) * .22 * devicePixelRatio,
+        r: (Math.random() * 1.8 + 1.1) * devicePixelRatio,
+        c: COLORS[(Math.random() * COLORS.length) | 0],
+        glow: 0
+      });
+    }
+  }
+  resize();
+  window.addEventListener("resize", resize);
+
+  var MAX_LINK = 150 * devicePixelRatio;
+  function frame(){
+    ctx.clearRect(0, 0, W, H);
+    var i, j, a, b, dx, dy, d;
+    for (i = 0; i < nodes.length; i++){
+      a = nodes[i];
+      a.x += a.vx; a.y += a.vy;
+      if (a.x < 0 || a.x > W) a.vx *= -1;
+      if (a.y < 0 || a.y > H) a.vy *= -1;
+    }
+    for (i = 0; i < nodes.length; i++){
+      for (j = i + 1; j < nodes.length; j++){
+        a = nodes[i]; b = nodes[j];
+        dx = a.x - b.x; dy = a.y - b.y;
+        d = Math.sqrt(dx * dx + dy * dy);
+        if (d < MAX_LINK){
+          var alpha = (1 - d / MAX_LINK) * .16;
+          ctx.strokeStyle = "rgba(250,249,245," + alpha.toFixed(3) + ")";
+          ctx.lineWidth = devicePixelRatio * .7;
+          ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+          /* 随机沿突触发送一次「脉冲」 */
+          if (!reduce && Math.random() < .0016){
+            spikes.push({x: a.x, y: a.y, tx: b.x, ty: b.y, t: 0, c: a.c});
+          }
+        }
+      }
+    }
+    /* 脉冲沿连线移动 */
+    for (i = spikes.length - 1; i >= 0; i--){
+      var s = spikes[i];
+      s.t += .045;
+      if (s.t >= 1){ spikes.splice(i, 1); continue; }
+      var px = s.x + (s.tx - s.x) * s.t;
+      var py = s.y + (s.ty - s.y) * s.t;
+      ctx.beginPath();
+      ctx.arc(px, py, devicePixelRatio * 2.4, 0, 6.284);
+      ctx.fillStyle = "rgba(" + s.c + ",.9)";
+      ctx.fill();
+    }
+    for (i = 0; i < nodes.length; i++){
+      a = nodes[i];
+      ctx.beginPath();
+      ctx.arc(a.x, a.y, a.r, 0, 6.284);
+      ctx.fillStyle = "rgba(" + a.c + ",.75)";
+      ctx.fill();
+    }
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+
+  /* ---------- 滚动显现 ---------- */
+  var io = new IntersectionObserver(function(es){
+    es.forEach(function(e){
+      if (e.isIntersecting){ e.target.classList.add("in"); io.unobserve(e.target); }
+    });
+  }, {threshold: .12});
+  document.querySelectorAll(".reveal").forEach(function(el, i){
+    el.style.transitionDelay = (i % 4) * 70 + "ms";
+    io.observe(el);
+  });
+
+  /* ---------- 数字滚动 ---------- */
+  function count(el){
+    var target = +el.dataset.count, plus = el.dataset.plus || "", t0 = null;
+    function step(t){
+      if (!t0) t0 = t;
+      var p = Math.min((t - t0) / 1400, 1);
+      var eased = 1 - Math.pow(1 - p, 3);
+      el.textContent = Math.round(target * eased).toLocaleString("en-US") + plus;
+      if (p < 1) requestAnimationFrame(step);
+    }
+    requestAnimationFrame(step);
+  }
+  var so = new IntersectionObserver(function(es){
+    es.forEach(function(e){
+      if (e.isIntersecting){ count(e.target); so.unobserve(e.target); }
+    });
+  }, {threshold: .6});
+  document.querySelectorAll("[data-count]").forEach(function(el){
+    if (reduce){ el.textContent = (+el.dataset.count).toLocaleString("en-US") + (el.dataset.plus || ""); }
+    else so.observe(el);
+  });
+})();
+</script>
+</body>
+</html>

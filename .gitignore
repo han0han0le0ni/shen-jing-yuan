@@ -1,0 +1,108 @@
+# 编译产物
+*.exe
+*.o
+*.obj
+*.dll
+*.so
+
+# 数据输出
+Experiment/data_b2/*.csv
+Experiment/data_b2/mini*.csv
+
+# 调试临时文件
+debug_*.exe
+debug_*.o
+debug_*.c
+Experiment/debug_*.c
+Experiment/debug_*.o
+Experiment/debug_*.exe
+Experiment/debug_direction.*
+Experiment/audit/full_report.html
+Experiment/audit/inspect.txt
+Experiment/audit/验收.md
+
+# IDE
+.vscode/
+.vs/
+*.swp
+
+# 系统
+.DS_Store
+Thumbs.db
+
+# 运行日志
+*.log
+
+# Python 缓存
+__pycache__/
+*.pyc
+
+# 临时备份/截图/测试
+*.bak
+*.jpg
+*.json
+
+# 构建备份目录（源码副本，不入库）
+Experiment/backup_*/
+
+# B1 扫描原始数据（可复现：tools/b1_sweep.ps1）
+Experiment/data/b1_m1/
+
+# 训练快照（本地学习成果，不入库）
+Experiment/data/training/
+
+# B1 完整验收原始运行数据（可复现：tools/b1_acceptance.py）
+Experiment/data/b1_acceptance/
+
+# 旧格式 CSV 归档（判据 §5）
+Experiment/data/legacy/
+
+# B1 根因诊断原始运行数据（可复现：tools/b1_bias_diagnosis.py）
+Experiment/data/b1_bias/
+
+# B1 离线监督上界原始数据（可复现：tools/b1_supervised_ceiling.py）
+Experiment/data/b1_ceiling/
+
+# B1 严格对称读出实验原始数据（可复现：tools/b1_symmetric_readout.py）
+Experiment/data/b1_sym/
+
+# B1 T1 两必要条件析因实验原始数据（可复现：tools/b1_t1_mechanism.py）
+Experiment/data/b1_t1/
+
+# B1 通路选择性第三因子实验原始数据（可复现：tools/b1_pathway_selectivity.py）
+Experiment/data/b1_psel/
+
+# B1 可学习内部前向模型实验原始数据（可复现：tools/b1_forward_model.py）
+Experiment/data/b1_fwd/
+
+# B1 时序差分自预测实验原始数据（可复现：tools/b1_self_supervised.py）
+Experiment/data/b1_ssp/
+
+# B1 方向校准与 host 口径复核原始数据（可复现：tools/b1_self_supervised.py --suite v19）
+Experiment/data/b1_cal/
+
+# B1 多尺度迹对照原始数据（可复现：tools/b1_self_supervised.py --suite v110）
+Experiment/data/b1_trace/
+
+# 工具链本机状态（gh CLI device-id 等），不入库
+.local/
+
+# B1 sign(theta) 可辨识性审计原始数据（可复现：tools/b1_self_supervised.py --suite v111 [--holdout]）
+Experiment/data/b1_sign/
+
+# B1 探索噪声与延迟扫描原始数据（可复现：--suite v112 / v113 [--holdout]）
+Experiment/data/b1_noise/
+Experiment/data/b1_delay/
+
+# B1 收尾原始数据（可复现：--suite v114 tau_e-N / v115 稀疏化 / v116 neuromod 工件 / v117 迹参数对齐）
+Experiment/data/b1_taun/
+Experiment/data/b1_sparse/
+Experiment/data/b1_ref/
+Experiment/data/b1_nm_align/
+
+# neuromod 参考实现对照（可复现：tools/nm_synapse_compare.py；crate 构建产物不入库）
+Experiment/data/b1_nm_syn/
+Experiment/ref_neuromod/target/
+
+# B2 原始数据（可复现：benchmark2.exe --preset m2；含历史 data_b2/*.csv 与日志）
+Experiment/data_b2/
