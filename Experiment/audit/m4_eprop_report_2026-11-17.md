@@ -310,14 +310,17 @@ B2 判据 `medR ≤ 0.20` 只有 5/10、且预注册主判据本身被证伪。�
 
 - 代码：`brain_b2/benchmark2_core.c`（D1 874-882；D2 1174-1206；D3 1146-1158）
 - 脚本：`tools/cmd_align.py`（度量）、`tools/run_m4_eprop.ps1`（批跑）、
-  `tools/eval_weights.ps1` + `tools/sum_eval.py`（冻结权重 held-out 评测）
+  `tools/eval_weights.ps1` + `tools/sum_eval.py`（冻结权重 held-out 评测）、
+  `tools/m4_tail_diag.py`（尾部归因 D-a…D-e）
 - 轨迹/权重：`data_b2/m4/ep_8s/`（B 臂 8 seed）、`data_b2/m4/rstdp_eg0/`（ctrl 8 seed）、
   `data_b2/m4/scope_im/`（臂 D 8 seed）、`data_b2/m4/lr_sens/`（lr 敏感性 9 次）、
   `data_b2/m4/ep640/`（长预算 4 次）、`data_b2/m4/c1_base/`、`data_b2/m4/c1_eprop/`（工作点 C1 各 8 seed）、
   `data_b2/m4/seed_extra/`、`data_b2/m4/seed_extra_base/`（补 909/1010，两臂各 2 次）、
   `data_b2/m4/fix320/`、`data_b2/m4/lrcal*/`（早期校准）、`data_b2/m4/base320/`（A 臂复现）、
   `data_b2/m4/s3_*`（D2 前的发散证据）
-- held-out：`data_b2/m4/ho_eprop/`、`data_b2/m4/ho_base/`、`data_b2/m4/ho_im/`（各 8 seed × 40 ep）
+- held-out：`data_b2/m4/ho_eprop/`、`data_b2/m4/ho_base/`、`data_b2/m4/ho_im/`（各 8 seed × 40 ep）、
+  `data_b2/m4/ho_init/`（未训练权重＝机会水平，8 seed）
+- 归因：`data_b2/m4/tail_diag.json`（D-a…D-e 原始数值）
 - 汇总：`data_b2/m4/cmd_align_base8s.json`、`data_b2/m4/cmd_align_ep8s.json`
 - 复现：`build.ps1:98-101`（已用官方 build.ps1 重建，`build_info.json` 的源码/产物哈希同步）；
   **最终二进制**复跑 A 臂 seed 202 320 ep，CSV 与历史 `data_b2/v16_8s/s202.csv`
@@ -325,7 +328,40 @@ B2 判据 `medR ≤ 0.20` 只有 5/10、且预注册主判据本身被证伪。�
 
 ---
 
-## 10. 一表汇总（`py tools/m4_agg.py` → `data_b2/m4/m4_agg.json`）
+## 9b. 尾部归因（2026-11-18，`tools/m4_tail_diag.py` → `data_b2/m4/tail_diag.json`）
+
+`medR` 只有 5/10 ≤ 0.20，尾部（s606/s707/s808/s1010）卡在 0.22–0.43。先判"尾部为什么慢"，
+五个维度全部用已有产物测，**零训练**；按 `medR` 中位切成快 5 / 慢 5 两组比较。
+
+| 维度 | 指标 | 快 5 | 慢 5 | Δ | 判读 |
+|---|---|---|---|---|---|
+| D-a 表征可分辨性 | `corr(per-motor drive, pref)` | +0.048 | +0.060 | −0.012 | 无差；两者都 ≈0（运动层**没有**建出 pref 单调梯度） |
+| D-a | `contrast`（正负池落差） | +0.777 | +0.831 | −0.054 | 无差 |
+| D-a | `push`（净推动） | +0.334 | +0.421 | −0.086 | 无差 |
+| D-a | 有效神经元占比 | 16.7% | 18.1% | −0.014 | 无差 |
+| D-b 解码噪声 | `sd(ω)` | 0.297 | 0.286 | +0.011 | 无差（两者都 ≈0.29） |
+| D-b | 远段符号一致率 | 0.218 | 0.234 | −0.016 | 无差，且**都接近掷硬币** |
+| D-b | 胜者熵（归一） | 0.966 | 0.962 | +0.004 | 无差（都接近均匀，无神经元垄断） |
+| D-e 低频相干 | `sd(EMA)/sd(raw)` | 0.194 | 0.188 | +0.006 | 无差 |
+| D-e | `corr(EMA(ω), ω*)` | −0.002 | −0.179 | **+0.178** | 方向对，但 n=5、sd≈0.17 ⇒ **t≈1.6，不显著** |
+| D-c 是否没训满 | `r(medR, 末 40 轮 medRatio)` | — | — | +0.653 | 同度量，非独立证据 |
+| D-c | `r(medR, 末段下降量)` | — | — | +0.259 | 不支持"没训满" |
+
+**机会水平对照**（补做）：把未训练的初始权重 `w0_s*.txt` 放进同一 held-out 口径评测，
+`medD = 1.058 ± 0.239`、`0/8 ≤ 0.40`。⇒ B 臂 0.206 远高于机会水平，**任务指标本身是有效的**，
+不是"随机游走碰巧撞到目标"。
+
+**结论（必须如实写）**：五个维度**没有一个能显著区分快慢 seed**。
+- 不是"没训满"（D-c）；
+- 不是解码噪声（`sd(ω)`、胜者熵全一致）；
+- 不是运动层权重方向性（`corr(drive, pref)≈0`，快慢相同）；
+- 低频相干有方向但未达显著。
+
+⇒ 尾部差异更像**seed 个体差异（盆地形/混沌）**，而不是某个可调参数的系统性偏差。
+这直接改变下一步的判断：**「压 medR 右尾」没有明确的调节杠杆**（lr 已在同区间、解码噪声一致、
+运动层方向性不存在），继续在这条轴上扫参数属于赌博。
+
+---
 
 ```
 arm                           n     medD_in  <=0.40    arr   medD_heldout  <=0.40
