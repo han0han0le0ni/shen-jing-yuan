@@ -22,6 +22,12 @@
 - QSS 必须显式覆盖 `QDockWidget / QTabWidget::pane / QTabBar::tab / QScrollArea / QScrollBar / SpinBox 子按钮`，否则深色主题下设置面板是刺眼的白色块。
 - 界面文案避免 `⚙ ▶ ☀` 等装饰符号（无头字体库只有 5 个族时会变方块），统一用纯中文。
 
+## v5.1 渲染优化（2026-11-17，大网络不卡）
+- **诊断**：4400 节点时 `update_snapshot` 只要 1ms，但 `update+repaint` 要 55ms（18 FPS）。瓶颈是 Qt 逐个渲染 4400 个 `QGraphicsEllipseItem`（其中高亮突触 450 条 AA 线独占 34.7ms），不是 numpy 逻辑。
+- **修复**：`NetworkGraph` 把 N 个节点图元 + 3 条动态 QPainterPath 全合并成**单张 numpy 光栅化位图**（`_build_node_raster` 预生成模板/索引，`_draw_nodes` 每帧 scatter 高亮线→残影→光晕→节点，`convertFromImage` 一次上传）。4400 节点 55ms → **17.7ms/帧（56 FPS）**。
+- **两个必记坑**：① `QGraphicsPixmapItem` 持有 pixmap 副本，每帧 `convertFromImage` 后**必须 `setPixmap()`**，否则节点不显示（截图验证）；② 小端 `QImage(ARGB32)` 内存序是 **BGRA**，numpy 写模板通道要按 B,G,R,A 排。
+- 可调：光晕 cap 700、高亮线上限 300（`chosen[:300]`）、线采样间隔 6px。备份 `vis/neuron_vis_优化前备份_20261117.py.bak`。命中检测仍走 numpy `_px/_py`，`self.items` 已空但保留兼容。
+
 ## B2 训练核心 v6（2026-11-11）
 - `net2_init` 之后所有新通道默认关闭，`net2_set_param` 支持 `error_gain / novelty_gain / cf_lambda / hetero_tau / hetero_thresh / hetero_tune`，host 有同名 CLI 开关。改 C 核心后必须 `build.ps1` 全量重编译（exe + DLL），否则二进制与源码脱节。
 - `benchmark2_core.c` / `benchmark2_host.cpp` 曾有**双 UTF-8 BOM** 导致 gcc/g++ 解析失败；如再遇到「vadefs.h #pragma pack 报错」先查文件头 BOM。

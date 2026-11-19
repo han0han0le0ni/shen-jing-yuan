@@ -185,6 +185,26 @@ typedef struct {
     double eprop_beta2;           /* 默认 0.999 */
     double eprop_eps;             /* 默认 1e-8 */
 
+    /* v18（B2-struct，负责人 2026-11-18 签字，预注册 audit/b2_struct_prereg_2026-11-18.md）：
+     * 结构可塑——**只生长、不剪枝**。默认 0 = 关闭 ⇒ 旧路径逐位不变。
+     *   1 = 活动依赖生长（近 20 ep 共激活计数选边，补足运动层入度）
+     *   2 = 随机生长（新增数量同臂 B、位置随机；对照臂 C）
+     *   3 = 按索引补入度（不看共激活；臂 D，用于分离"选择规则"与"补足入度"）
+     * 预算：总突触 ≤ (1+struct_budget)×S0；单轮新增 ≤ struct_round_frac×S0。 */
+    int    struct_mode;         /* 默认 0 */
+    int    struct_fmin;         /* 运动层入度下限，默认 150 */
+    int    struct_interval;     /* 结构轮间隔（ep），默认 100 */
+    int    struct_window;       /* 共激活统计窗口（ep），默认 20 */
+    double struct_new_scale;    /* 新边权重 = scale × 同通路中位数，默认 0.5 */
+    double struct_budget;       /* 总量预算比例，默认 0.20 */
+    double struct_round_frac;   /* 单轮预算比例，默认 0.02 */
+    /* v19（D5 修复，2026-11-18 签字）：候选打分来源。
+     * 0 = 共激活计数 coact（旧，默认 ⇒ 旧路径逐位不变；实测在 coact≈0 时退化为任意序，
+     *     选出的是几乎不发放的 input_x 前神经元，新增边永远沉默 = 缺陷 D5）
+     * 1 = 每神经元 EMA 发放率 rate[]（需 rate_trace 已开；host 在 struct_score=1 且
+     *     rate_tau<=0 时自动置 tau=20 tick） */
+    int    struct_score;
+
 } HyperParams2;
 
 /* ============================================================
@@ -278,6 +298,14 @@ typedef struct {
     double* ep_L;        /* 逐神经元学习信号 L_j（按神经元） */
     double* ep_z;        /* 逐神经元伪导数 z_j（按神经元） */
     int     ep_step;     /* ADAM 步数（偏置校正用） */
+
+    /* v18（B2-struct）：[input+hidden] × [motor] 共激活计数（饱和 uint16，≈5 MB）。
+     * struct_mode=0 时不分配、不读写 ⇒ 旧路径逐位不变。 */
+    unsigned short* coact;
+    int coact_rows;
+    int coact_cols;
+    int struct_rounds;   /* 已执行的结构轮数 */
+    int struct_added;    /* 累计新增突触数 */
 } NetworkState2;
 
 /* ============================================================
@@ -296,6 +324,10 @@ int  net2_init(NetworkState2* net, int input_n, int hidden_n,
 int  net2_init_ex(NetworkState2* net, int input_n, int hidden_n,
                   int motor1_n, int motor2_n, double avg_conn,
                   unsigned int seed, int direct_fan, double hm_scale, double im_scale);
+
+/* v20（B2-workpoint S2）：把 H→H 权重整体缩放到目标谱半径（幂迭代 + clamp 复算，≤3 轮）。
+ * 返回 0 成功；rho_out 回填实测 ρ。只在 host 显式给 --rho-target>0 时调用。 */
+int net2_normalize_rho(NetworkState2* net, double target, double* rho_out);
 void net2_destroy(NetworkState2* net);
 
 /* 真实规模查询：VIS/ctypes 调用者必须用这两个返回值分配缓冲区。
@@ -406,6 +438,12 @@ void net2_scale_weights(NetworkState2* net, double s);
  * 动机：§6.35/§6.39 记录的「训练后网络拿不出来」导致机制解释只能写"推断"。 */
 int net2_export_weights(NetworkState2* net, const char* path);
 int net2_import_weights(NetworkState2* net, const char* path);
+
+/* v18（B2-struct，2026-11-18 签字）：执行一次结构轮——只在 ep>0 且
+ * ep % hp.struct_interval == 0 且 hp.struct_mode>0 时真正动作，否则返回 0。
+ * 返回本轮新增的突触数；<0 表示失败（容量/内存）。host 在 episode 边界调用。
+ * 同时把本轮统计写进 out（长度 4）：[新增数, 总突触数, 入度最小, 入度中位]。 */
+int net2_struct_round(NetworkState2* net, int ep, int* out4);
 
 /* 写 topology JSON 文件（初始化后调用一次） */
 void net2_dump_topology_json(NetworkState2* net, const char* filepath);

@@ -46,6 +46,46 @@ static int ensure_synapse_capacity(NetworkState2* net, int needed) {
     return 0;
 }
 
+/* v18（B2-struct）：共激活统计缓冲按需分配（[input+hidden] × [motor]，饱和 uint16）。
+ * struct_mode=0 时永不调用 ⇒ 默认路径零内存、零读写。返回 0 成功。 */
+static int struct_ensure_coact(NetworkState2* net) {
+    if (net->coact) return 0;
+    int rows = net->input_count + net->hidden_count;
+    int cols = net->motor1_count + net->motor2_count;
+    if (rows <= 0 || cols <= 0) return -1;
+    net->coact = (unsigned short*)calloc((size_t)rows * (size_t)cols, sizeof(unsigned short));
+    if (!net->coact) return -1;
+    net->coact_rows = rows;
+    net->coact_cols = cols;
+    return 0;
+}
+
+/* 中位数（会就地排序，调用者传副本） */
+static int struct_cmp_double(const void* a, const void* b) {
+    double x = *(const double*)a, y = *(const double*)b;
+    return (x > y) - (x < y);
+}
+static double median_inplace(double* v, int n) {
+    if (n <= 0) return 0.0;
+    qsort(v, (size_t)n, sizeof(double), struct_cmp_double);
+    return (n & 1) ? v[n / 2] : 0.5 * (v[n / 2 - 1] + v[n / 2]);
+}
+
+static int struct_cmp_int(const void* a, const void* b) {
+    int x = *(const int*)a, y = *(const int*)b;
+    return (x > y) - (x < y);
+}
+
+/* 候选 (pre_id, score)：按 score 降序，score 相同则 pre 升序（保证确定性） */
+typedef struct { int pre; double score; } StructCand;
+static int struct_cmp_cand(const void* a, const void* b) {
+    const StructCand* x = (const StructCand*)a;
+    const StructCand* y = (const StructCand*)b;
+    if (x->score > y->score) return -1;
+    if (x->score < y->score) return 1;
+    return (x->pre > y->pre) - (x->pre < y->pre);
+}
+
 /* ============================================================
  * 两关节臂物理
  * ============================================================ */
@@ -513,6 +553,22 @@ int net2_init_ex(NetworkState2* net, int input_n, int hidden_n,
     net->ep_z = (double*)calloc((size_t)(net->neuron_count > 0 ? net->neuron_count : 1), sizeof(double));
     if (!net->ep_m || !net->ep_v || !net->ep_L || !net->ep_z) { net2_destroy(net); return -1; }
 
+    /* v18（B2-struct）：结构可塑。默认全关；coact 延迟到 struct_mode>0 的第一次 tick 才分配，
+     * 因此 struct_mode=0 时既无额外内存也无任何读写 ⇒ 旧路径逐位不变。 */
+    net->hp.struct_mode       = 0;
+    net->hp.struct_fmin       = 150;
+    net->hp.struct_interval   = 100;
+    net->hp.struct_window     = 20;
+    net->hp.struct_new_scale  = 0.5;
+    net->hp.struct_budget     = 0.20;
+    net->hp.struct_round_frac = 0.02;
+    net->hp.struct_score      = 0;      /* v19：0=coact（旧，逐位不变） */
+    net->coact = NULL;
+    net->coact_rows = 0;
+    net->coact_cols = 0;
+    net->struct_rounds = 0;
+    net->struct_added = 0;
+
     #if ELIGIBILITY_TRACE_ENABLE
     net->use_eligibility_trace = 1;
     #else
@@ -564,6 +620,7 @@ void net2_destroy(NetworkState2* net) {
     if (net->ep_v) free(net->ep_v);
     if (net->ep_L) free(net->ep_L);
     if (net->ep_z) free(net->ep_z);
+    if (net->coact) free(net->coact);
     memset(net, 0, sizeof(NetworkState2));
 }
 
@@ -1125,6 +1182,29 @@ void net2_tick(NetworkState2* net) {
         net->cf_ema2 += CF_EMA_ALPHA * (net->cf_err2 - net->cf_ema2);
     }
 
+    /* v18（B2-struct，2026-11-18 签字）：共激活计数——为下一次结构轮选边用。
+     * 只统计 (pre ∈ input∪hidden, post ∈ motor) 且同 tick 双方都发放的对，饱和 uint16。
+     * struct_mode=0 → 整段跳过（连缓冲都不分配）⇒ 旧路径逐位不变。 */
+    if (net->hp.struct_mode > 0) {
+        if (struct_ensure_coact(net) == 0) {
+            const int cm1b = net->input_count + net->hidden_count;
+            const int cols = net->coact_cols;
+            int s2;
+            for (s2 = 0; s2 < net->synapse_count; s2++) {
+                Synapse2* sy2 = &net->synapses[s2];
+                int po2 = sy2->post_id;
+                if (po2 < cm1b) continue;
+                if (!net->neurons[po2].is_spiking) continue;
+                if (!net->neurons[sy2->pre_id].is_spiking) continue;
+                {
+                    unsigned short* c = &net->coact[(size_t)sy2->pre_id * (size_t)cols
+                                                    + (size_t)(po2 - cm1b)];
+                    if (*c < 65535) (*c)++;
+                }
+            }
+        }
+    }
+
     /* v17（M4，负责人 2026-11-17「签字」）：symmetric e-prop
      *   L_j = Σ_k w_{j→k}·e_k （k 为运动层，用真实输出权重；e_k = clamp(ω*_k − ω_k, ±1)）
      *   z_j = α·max(0, 1 − |v_j − θ_j| / (θ_j − v_rest))
@@ -1206,6 +1286,226 @@ void net2_tick(NetworkState2* net) {
     }
 
     /* reward queue 已移到 tick 开头处理（修正了 1 tick 的时序错位） */
+}
+
+/* ============================================================
+ * v18（B2-struct，负责人 2026-11-18 签字，预注册 audit/b2_struct_prereg_2026-11-18.md）
+ * 结构轮：只生长、不剪枝。host 在每个 episode 边界调用（内部早退，未到轮次时开销≈0）。
+ *   struct_mode=1 活动依赖：候选按 coact/(1+出度) 排序，为入度不足的运动神经元补到 F_MIN
+ *   struct_mode=2 随机生长：新增数量同 1，但 (pre,post) 随机（对照臂 C，排除"多连接=更好"）
+ *   struct_mode=3 按索引补入度：候选按 pre 序号取，不看共激活（臂 D）
+ * 预算：总量 ≤ struct_budget×S0；单轮 ≤ struct_round_frac×S0（S0 = 初始突触数）。
+ * out4 = [本轮新增, 总突触数, 入度最小, 入度中位]（可为 NULL）。
+ * ============================================================ */
+int net2_struct_round(NetworkState2* net, int ep, int* out4) {
+    HyperParams2* hp;
+    int m1b, ntot, nm, rows, cols, S0, budget_total, budget_round, cap;
+    int *fanin = NULL, *odeg = NULL, *need = NULL, *order = NULL;
+    unsigned char* conn = NULL;
+    double* wbuf = NULL;
+    int i, s, added = 0, to_add, nI = 0, nH = 0;
+    double wItoM, wHtoM;
+    int is_round, fail = 0;
+
+    if (!net) return -1;
+    hp = &net->hp;
+    if (out4) { out4[0] = 0; out4[1] = net->synapse_count; out4[2] = 0; out4[3] = 0; }
+    if (hp->struct_mode <= 0 || hp->struct_interval <= 0) return 0;
+    if (ep <= 0) return 0;
+    if (struct_ensure_coact(net) != 0) return -1;
+
+    m1b  = net->input_count + net->hidden_count;
+    ntot = net->neuron_count;
+    nm   = net->motor1_count + net->motor2_count;
+    rows = net->coact_rows;
+    cols = net->coact_cols;
+    if (rows != m1b || cols != nm) return -1;
+
+    is_round = ((ep % hp->struct_interval) == 0);
+    if (!is_round) {
+        /* 窗口重置：每 struct_window ep 清零 ⇒ 到结构轮时缓冲≈最近一个窗口 */
+        if (hp->struct_window > 0 && (ep % hp->struct_window) == 0)
+            memset(net->coact, 0, (size_t)rows * (size_t)cols * sizeof(unsigned short));
+        return 0;
+    }
+
+    S0 = net->synapse_count - net->struct_added;      /* 初始突触数 */
+    budget_total = (int)(S0 * hp->struct_budget) - net->struct_added;
+    budget_round = (int)(S0 * hp->struct_round_frac);
+    cap = (budget_total < budget_round) ? budget_total : budget_round;
+    if (cap <= 1) return 0;                            /* 预算耗尽 → 不再生长 */
+
+    fanin = (int*)calloc((size_t)nm, sizeof(int));
+    odeg  = (int*)calloc((size_t)rows, sizeof(int));
+    need  = (int*)calloc((size_t)nm, sizeof(int));
+    order = (int*)calloc((size_t)nm, sizeof(int));
+    conn  = (unsigned char*)calloc((size_t)rows * (size_t)cols, 1);
+    wbuf  = (double*)calloc((size_t)(net->synapse_count > 0 ? net->synapse_count : 1), sizeof(double));
+    if (!fanin || !odeg || !need || !order || !conn || !wbuf) { fail = 1; goto done; }
+
+    for (s = 0; s < net->synapse_count; s++) {
+        int po = net->synapses[s].post_id;
+        int pr = net->synapses[s].pre_id;
+        if (po < m1b || po >= ntot) continue;
+        fanin[po - m1b]++;
+        if (pr >= 0 && pr < rows) {
+            odeg[pr]++;
+            conn[(size_t)pr * (size_t)cols + (size_t)(po - m1b)] = 1;
+        }
+    }
+
+    /* 新边权重 = scale × 同通路中位数：I→M 从 buffer 头、H→M 从 buffer 尾各自堆叠 */
+    for (s = 0; s < net->synapse_count; s++) {
+        int po = net->synapses[s].post_id;
+        int pr = net->synapses[s].pre_id;
+        if (po < m1b || po >= ntot) continue;
+        if (pr < net->input_count) {
+            wbuf[nI++] = net->synapses[s].weight;
+        } else if (pr < m1b) {
+            wbuf[(net->synapse_count - 1) - nH] = net->synapses[s].weight;
+            nH++;
+        }
+    }
+    wItoM = median_inplace(wbuf, nI);
+    wHtoM = median_inplace(wbuf + (net->synapse_count - nH), nH);
+    if (wItoM <= 0.0) wItoM = 1.0;
+    if (wHtoM <= 0.0) wHtoM = 1.0;
+    wItoM = clamp2(hp->struct_new_scale * wItoM, WEIGHT_MIN, WEIGHT_MAX);
+    wHtoM = clamp2(hp->struct_new_scale * wHtoM, WEIGHT_MIN, WEIGHT_MAX);
+
+    to_add = 0;
+    for (i = 0; i < nm; i++) {
+        need[i] = hp->struct_fmin - fanin[i];
+        if (need[i] < 0) need[i] = 0;
+        order[i] = i;
+        to_add += need[i];
+    }
+    if (to_add > cap) to_add = cap;
+
+    /* 预留 ep_m/ep_v 槽位：新增突触必须有 ADAM 状态，否则索引越界 */
+    if (to_add > 0) {
+        int ns = net->synapse_count + to_add;
+        double* tmp = (double*)realloc(net->ep_m, (size_t)ns * sizeof(double));
+        if (!tmp) { fail = 1; goto done; }
+        net->ep_m = tmp;
+        tmp = (double*)realloc(net->ep_v, (size_t)ns * sizeof(double));
+        if (!tmp) { fail = 1; goto done; }
+        net->ep_v = tmp;
+        for (i = net->synapse_count; i < ns; i++) { net->ep_m[i] = 0.0; net->ep_v[i] = 0.0; }
+    }
+
+    if (hp->struct_mode == 2) {
+        /* 随机生长：数量相同、位置随机；独立 LCG，不污染网络主 RNG */
+        unsigned int rs = 0x9E3779B9u ^ (unsigned int)ep;
+        int k;
+        for (k = 0; k < to_add; k++) {
+            int mo, pre = -1, guard = 0;
+            rs = rs * 1664525u + 1013904223u;
+            mo = (int)(rs % (unsigned int)cols);
+            for (;;) {
+                rs = rs * 1664525u + 1013904223u;
+                pre = (int)(rs % (unsigned int)rows);
+                if (!conn[(size_t)pre * (size_t)cols + (size_t)mo]) break;
+                if (++guard > 64) { pre = -1; break; }
+            }
+            if (pre < 0) continue;
+            if (ensure_synapse_capacity(net, net->synapse_count + 1) != 0) break;
+            {
+                Synapse2* sy = &net->synapses[net->synapse_count];
+                sy->pre_id = pre;
+                sy->post_id = m1b + mo;
+                sy->weight = (pre < net->input_count) ? wItoM : wHtoM;
+                sy->eligibility_trace = 0.0;
+                sy->last_stdp_tick = -1;
+                net->synapse_count++;
+                added++;
+                conn[(size_t)pre * (size_t)cols + (size_t)mo] = 1;
+                fanin[mo]++;
+            }
+        }
+    } else {
+        StructCand* cand = (StructCand*)calloc((size_t)rows, sizeof(StructCand));
+        int remaining = to_add;
+        if (!cand) { fail = 1; goto done; }
+        /* 缺口大的先补（同一 cap 下优先救最缺的运动神经元） */
+        for (i = 0; i < nm; i++) {
+            int best = i, j;
+            for (j = i + 1; j < nm; j++) if (need[order[j]] > need[order[best]]) best = j;
+            { int t = order[i]; order[i] = order[best]; order[best] = t; }
+        }
+        for (i = 0; i < nm && remaining > 0; i++) {
+            int mo = order[i], k, want, nc = 0;
+            if (need[mo] <= 0) continue;
+            want = (need[mo] < remaining) ? need[mo] : remaining;
+            for (k = 0; k < rows; k++) {
+                NeuronType2 ty = net->neurons[k].type;
+                if (ty != NT_INPUT_X && ty != NT_INPUT_PROP && ty != NT_HIDDEN) continue;
+                if (conn[(size_t)k * (size_t)cols + (size_t)mo]) continue;
+                cand[nc].pre = k;
+                if (hp->struct_mode == 3) {
+                    cand[nc].score = -(double)k;                        /* 按索引 */
+                } else if (hp->struct_score == 1 && net->rate) {
+                    /* v19（D5 修复）：用真实发放率而非共激活计数。
+                     * 旧 coact 在多数 (前,后) 对上恒为 0 ⇒ 打分全相等、qsort 退化为任意序，
+                     * 选出来的是几乎不发放的 input_x 前神经元，新增边永远沉默。 */
+                    cand[nc].score = net->rate[k] / (1.0 + (double)odeg[k]);
+                } else {
+                    cand[nc].score = (double)net->coact[(size_t)k * (size_t)cols + (size_t)mo]
+                                     / (1.0 + (double)odeg[k]);         /* 活动依赖 */
+                }
+                nc++;
+            }
+            if (nc == 0) continue;
+            qsort(cand, (size_t)nc, sizeof(StructCand), struct_cmp_cand);
+            if (want > nc) want = nc;
+            for (k = 0; k < want; k++) {
+                int pre = cand[k].pre;
+                if (ensure_synapse_capacity(net, net->synapse_count + 1) != 0) break;
+                {
+                    Synapse2* sy = &net->synapses[net->synapse_count];
+                    sy->pre_id = pre;
+                    sy->post_id = m1b + mo;
+                    sy->weight = (pre < net->input_count) ? wItoM : wHtoM;
+                    sy->eligibility_trace = 0.0;
+                    sy->last_stdp_tick = -1;
+                    net->synapse_count++;
+                    added++;
+                    conn[(size_t)pre * (size_t)cols + (size_t)mo] = 1;
+                    odeg[pre]++;
+                    fanin[mo]++;
+                }
+            }
+            remaining -= want;
+        }
+        free(cand);
+    }
+
+done:
+    net->struct_added += added;
+    if (added > 0) net->struct_rounds++;
+    if (out4) {
+        int mn = -1;
+        out4[0] = added;
+        out4[1] = net->synapse_count;
+        if (fanin) {
+            int* tmp = (int*)calloc((size_t)nm, sizeof(int));
+            if (tmp) {
+                for (i = 0; i < nm; i++) tmp[i] = fanin[i];
+                qsort(tmp, (size_t)nm, sizeof(int), struct_cmp_int);
+                mn = tmp[0];
+                out4[2] = mn;
+                out4[3] = (nm & 1) ? tmp[nm / 2] : (tmp[nm / 2 - 1] + tmp[nm / 2]) / 2;
+                free(tmp);
+            }
+        }
+    }
+    if (fanin) free(fanin);
+    if (odeg) free(odeg);
+    if (need) free(need);
+    if (order) free(order);
+    if (conn) free(conn);
+    if (wbuf) free(wbuf);
+    return fail ? -1 : added;
 }
 
 void net2_get_cf_error(const NetworkState2* net, double* out4) {
@@ -1339,6 +1639,65 @@ void net2_get_snapshot(NetworkState2* net,
 /* ============================================================
  * 运行时参数设置 / 轮次控制（供宿主与 Python 可视化调用）
  * ============================================================ */
+
+/* v20（B2-workpoint S2，2026-11-18 签字）：H→H 子矩阵谱半径归一。
+ * 幂迭代求 ρ（权重全 ≥ WEIGHT_MIN ⇒ 非负矩阵，Perron 根实正），按 target/ρ 缩放 H→H 权重，
+ * clamp 后复算，最多 3 轮；偏离 >5% 时通过 rho_out 返回实测值（不静默失败）。
+ * 只在 host 显式给出 --rho-target>0 时调用 ⇒ 默认路径逐位不变。 */
+int net2_normalize_rho(NetworkState2* net, double target, double* rho_out) {
+    int i, it, round, h0, hn;
+    double *x = NULL, *y = NULL, lam = 0.0, nl, s;
+    long nz = 0, k;
+    if (!net || !net->synapses || target <= 0.0) return -1;
+    h0 = net->input_count;
+    hn = net->hidden_count;
+    if (hn <= 1) return -1;
+    for (k = 0; k < net->synapse_count; k++) {
+        int a = net->synapses[k].pre_id, b = net->synapses[k].post_id;
+        if (a >= h0 && a < h0 + hn && b >= h0 && b < h0 + hn) nz++;
+    }
+    if (nz == 0) return -1;
+    x = (double*)calloc((size_t)hn, sizeof(double));
+    y = (double*)calloc((size_t)hn, sizeof(double));
+    if (!x || !y) { free(x); free(y); return -1; }
+
+    for (round = 0; round < 3; round++) {
+        /* 幂迭代（固定初值，保证可复现） */
+        for (i = 0; i < hn; i++) { x[i] = 1.0; }
+        nl = sqrt((double)hn);
+        for (i = 0; i < hn; i++) x[i] /= nl;
+        lam = 0.0;
+        for (it = 0; it < 300; it++) {
+            for (i = 0; i < hn; i++) y[i] = 0.0;
+            for (k = 0; k < net->synapse_count; k++) {
+                int a = net->synapses[k].pre_id, b = net->synapses[k].post_id;
+                if (a >= h0 && a < h0 + hn && b >= h0 && b < h0 + hn)
+                    y[b - h0] += net->synapses[k].weight * x[a - h0];
+            }
+            nl = 0.0;
+            for (i = 0; i < hn; i++) nl += y[i] * y[i];
+            nl = sqrt(nl);
+            if (nl <= 0.0) { lam = 0.0; break; }
+            for (i = 0; i < hn; i++) x[i] = y[i] / nl;
+            if (fabs(nl - lam) < 1e-9 * (nl > 1.0 ? nl : 1.0)) { lam = nl; break; }
+            lam = nl;
+        }
+        if (lam <= 0.0) break;
+        if (rho_out) *rho_out = lam;
+        if (fabs(lam - target) <= 0.05 * target) break;
+        s = target / lam;
+        for (k = 0; k < net->synapse_count; k++) {
+            int a = net->synapses[k].pre_id, b = net->synapses[k].post_id;
+            if (a >= h0 && a < h0 + hn && b >= h0 && b < h0 + hn)
+                net->synapses[k].weight = clamp2(net->synapses[k].weight * s,
+                                                 WEIGHT_MIN, WEIGHT_MAX);
+        }
+    }
+    free(x); free(y);
+    if (rho_out) *rho_out = lam;
+    return 0;
+}
+
 static int b2_param_is(const char* a, const char* b) {
     return strcmp(a, b) == 0;
 }
@@ -1459,6 +1818,32 @@ int net2_set_param(NetworkState2* net, const char* name, double value) {
     } else if (b2_param_is(name, "eprop_lr")) {
         if (value <= 0.0 || value > 1.0) return -1;
         hp->eprop_lr = value;
+    } else if (b2_param_is(name, "struct_mode")) {
+        /* v18（B2-struct）：0=关闭（默认） 1=活动依赖 2=随机（对照） 3=按索引 */
+        if (value < 0.0 || value > 3.0) return -1;
+        hp->struct_mode = (int)(value + 0.5);
+    } else if (b2_param_is(name, "struct_fmin")) {
+        if (value < 1.0 || value > 100000.0) return -1;
+        hp->struct_fmin = (int)(value + 0.5);
+    } else if (b2_param_is(name, "struct_interval")) {
+        if (value < 1.0 || value > 100000.0) return -1;
+        hp->struct_interval = (int)(value + 0.5);
+    } else if (b2_param_is(name, "struct_window")) {
+        if (value < 1.0 || value > 100000.0) return -1;
+        hp->struct_window = (int)(value + 0.5);
+    } else if (b2_param_is(name, "struct_new_scale")) {
+        if (value <= 0.0 || value > 10.0) return -1;
+        hp->struct_new_scale = value;
+    } else if (b2_param_is(name, "struct_budget")) {
+        if (value < 0.0 || value > 5.0) return -1;
+        hp->struct_budget = value;
+    } else if (b2_param_is(name, "struct_round_frac")) {
+        if (value <= 0.0 || value > 1.0) return -1;
+        hp->struct_round_frac = value;
+    } else if (b2_param_is(name, "struct_score")) {
+        /* v19（D5 修复）：0=coact（旧，逐位不变） 1=rate[] */
+        if (value != 0.0 && value != 1.0) return -1;
+        hp->struct_score = (int)value;
     } else {
         return -1;
     }
@@ -1485,6 +1870,9 @@ double net2_get_param(const NetworkState2* net, const char* name) {
     B2_GET("eprop_scope", (double)hp->eprop_scope);
     B2_GET("eprop_alpha", hp->eprop_alpha);
     B2_GET("eprop_lr", hp->eprop_lr);
+    B2_GET("struct_mode", (double)hp->struct_mode);
+    B2_GET("struct_fmin", (double)hp->struct_fmin);
+    B2_GET("struct_added", (double)net->struct_added);
     B2_GET("trace_clamp", hp->trace_clamp);
     B2_GET("decode_mode", hp->decode_mode);
     B2_GET("wta_k", hp->wta_k);

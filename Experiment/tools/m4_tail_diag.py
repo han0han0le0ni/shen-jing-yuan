@@ -32,10 +32,12 @@ import numpy as np
 
 EXP = Path(__file__).resolve().parent.parent
 
-# m2 预设：1000 输入 + 3500 隐藏 + 278/278 运动 = 5056
-M1_BASE = 4500
-M1_N = 278
-M2_N = 278
+# m2 预设的真实层边界（meta.json：input 1000 + prop 56 = 1056；hidden 3500；motor1/2 各 250）
+# 2026-11-18 修正：早期版本误用 4500/278，导致 D-a 的 drive 与 pref 错位 56 个神经元，
+# 相关被稀释成 ≈0。凡是"运动层群体"统计都必须用这里的边界。
+M1_BASE = 1056 + 3500      # 4556
+M1_N = 250
+M2_N = 250
 
 
 def load_wdump(path):
@@ -138,7 +140,7 @@ def diag_b(seeds, last_ep=40):
             far_ok += int(ag[far].sum()); far_n += int(far.sum())
             near_ok += int(ag[near].sum()); near_n += int(near.sum())
         om_all = np.concatenate(om_all) if om_all else np.array([0.0])
-        # 胜者熵：按 motor1 的 278 个离散 pref 分箱
+        # 胜者熵：按 motor1 的 M1_N（250）个离散 pref 分箱
         bins = np.round((om_all + 0.5) * (M1_N - 1)).astype(int)
         bins = np.clip(bins, 0, M1_N - 1)
         cnt = np.bincount(bins, minlength=M1_N).astype(np.float64)

@@ -29,6 +29,7 @@ struct B2Config {
     int motor1_n   = 50;     /* 关节1运动神经元 */
     int motor2_n   = 50;     /* 关节2运动神经元 */
     double avg_conn = 8.0;
+double rho_target = 0.0;   /* v20：H→H 目标谱半径，0=关闭（旧行为） */
     
     int episodes     = 20;   /* 尝试轮数：每轮一直跑到碰到目标 */
     int score_horizon = 1000; /* 速度评分参考步数：只参与奖励计算，不终止本轮 */
@@ -61,6 +62,13 @@ struct B2Config {
     int    eprop_scope = 0;      /* 0=全通路 1=仅 I→M（消融臂 D） */
     double eprop_alpha = 0.3;    /* 伪导数斜率 */
     double eprop_lr    = 1e-3;   /* ADAM 步长（P3 由单 seed 校准后写死） */
+
+    /* v18（B2-struct，2026-11-18 签字，audit/b2_struct_prereg_2026-11-18.md）
+     * 0=关闭（默认，逐位不变） 1=活动依赖生长 2=随机生长（对照） 3=按索引补入度 */
+    int    struct_mode     = 0;
+    int    struct_fmin     = 150;
+    int    struct_interval = 100;
+    int    struct_score    = 0;    /* v19：0=coact（旧，逐位不变） 1=rate[] */
     double trace_clamp = 1.0;
     double tau_trace = 2000.0;
     int decode_mode = 0;          /* 0=WTA 均值, 2=膜电位加权 */
@@ -232,6 +240,10 @@ int main(int argc, char* argv[]) {
                                            cfg.eprop_scope = (m == "im" || m == "I-M" || m == "i2m") ? 1 : 0; }
         else if (a == "--eprop-alpha")   nextf(cfg.eprop_alpha);
         else if (a == "--eprop-lr")      nextf(cfg.eprop_lr);
+        else if (a == "--struct")        { if (i+1<argc) cfg.struct_mode = atoi(argv[++i]); }
+        else if (a == "--struct-fmin")   { if (i+1<argc) cfg.struct_fmin = atoi(argv[++i]); }
+        else if (a == "--struct-score")  { if (i+1<argc) cfg.struct_score = atoi(argv[++i]); }
+        else if (a == "--struct-interval") { if (i+1<argc) cfg.struct_interval = atoi(argv[++i]); }
         else if (a == "--trace-clamp")  nextf(cfg.trace_clamp);
         else if (a == "--tau-trace")    nextf(cfg.tau_trace);
         else if (a == "--wta-k")        next(cfg.wta_k);
@@ -242,6 +254,7 @@ int main(int argc, char* argv[]) {
         else if (a == "--budget")        next(cfg.budget);
         else if (a == "--eval-episodes") next(cfg.eval_episodes);
         else if (a == "--avg-conn")      nextf(cfg.avg_conn);
+        else if (a == "--rho-target")    nextf(cfg.rho_target);
         else if (a == "--dump-hidden")   { if (i+1<argc) cfg.dump_hidden = argv[++i]; }
         else if (a == "--load-readout")  { if (i+1<argc) cfg.load_readout = argv[++i]; }
         else if (a == "--dump-layer")    { std::string m = (i+1<argc) ? argv[++i] : ""; cfg.dump_layer = (m == "input") ? 1 : 0; }
@@ -290,6 +303,7 @@ int main(int argc, char* argv[]) {
                    "       [--lr-scale F --weight-scale F]  (学习增益 / 权重映射增益，默认 1.0)\n"
                    "       [--save-weights P --save-init-weights P --load-weights P --trace-cmd P [--trace-stride N]]\n"
                    "       [--eprop [--eprop-scope all|im] [--eprop-alpha F] [--eprop-lr F]]\n"
+                   "       [--struct 0|1|2|3 [--struct-fmin N] [--struct-interval N]]  (结构可塑：只生长)\n"
                    "       [--no-reward-baseline --tau-trace F --trace-clamp F]\n"
                    "       [--speed-reward (默认：每步成本 + 首达奖励 + 碰到即结算重来)]\n"
                    "       [--no-speed-reward (旧对照：固定步数、不结算)]\n"
@@ -376,6 +390,17 @@ int main(int argc, char* argv[]) {
     net.hp.eprop_scope = cfg.eprop_scope;
     net.hp.eprop_alpha = cfg.eprop_alpha;
     net.hp.eprop_lr    = cfg.eprop_lr;
+    /* v18（B2-struct）：结构可塑开关（默认 0 ⇒ 旧路径逐位不变） */
+    net.hp.struct_mode     = cfg.struct_mode;
+    net.hp.struct_fmin     = cfg.struct_fmin;
+    net.hp.struct_interval = cfg.struct_interval;
+    /* v19（D5 修复）：候选打分改用 rate[] 时，必须保证速率迹已分配；
+     * 用户没显式给 --rate-tau 时按 20 tick 开（EMA 到 ~63% 需 20 tick）。 */
+    net.hp.struct_score    = cfg.struct_score;
+    if (cfg.struct_score > 0 && cfg.rate_tau <= 0.0) {
+        net2_set_rate_trace(&net, 20.0);
+        if (cfg.readout_values == 1) net2_set_ext_rate(&net, 1);
+    }
     net.hp.trace_clamp = cfg.trace_clamp;
     net.hp.tau_trace = cfg.tau_trace;
     net.hp.lambda_trace = exp(-1.0 / cfg.tau_trace);
@@ -435,6 +460,17 @@ int main(int argc, char* argv[]) {
                "hetero(tau=%.3f thresh=%.3f tune=%.3f)\n",
                cfg.error_gain, cfg.novelty_gain, cfg.cf_lambda,
                cfg.hetero_tau, cfg.hetero_thresh, cfg.hetero_tune);
+    }
+
+    /* v20（B2-workpoint S2）：H→H 谱半径归一。默认 0 = 不调用，旧路径逐位不变。 */
+    if (cfg.rho_target > 0.0) {
+        double rho_meas = 0.0;
+        if (net2_normalize_rho(&net, cfg.rho_target, &rho_meas) == 0) {
+            printf("v20: rho target=%.3f measured=%.4f S=%d\n",
+                   cfg.rho_target, rho_meas, net.synapse_count);
+        } else {
+            fprintf(stderr, "v20: rho normalize failed (target=%.3f)\n", cfg.rho_target);
+        }
     }
     if (cfg.error_scope > 0) {
         printf("v13: error_scope=hidden error_scope_gain=%.3f (隐藏层输入突触接受误差塑形)\n",
@@ -536,6 +572,10 @@ int main(int argc, char* argv[]) {
                 cfg.save_weights.c_str(), cfg.load_weights.c_str(), cfg.trace_cmd.c_str(), cfg.trace_stride);
         fprintf(mf, "  \"eprop\": %d, \"eprop_scope\": %d, \"eprop_alpha\": %.4f, \"eprop_lr\": %.6f,\n",
                 cfg.eprop, cfg.eprop_scope, cfg.eprop_alpha, cfg.eprop_lr);
+        fprintf(mf, "  \"struct_mode\": %d, \"struct_fmin\": %d, \"struct_interval\": %d, \"struct_added\": %d,\n",
+                cfg.struct_mode, cfg.struct_fmin, cfg.struct_interval, net.struct_added);
+        fprintf(mf, "  \"struct_score\": %d, \"rate_tau\": %.1f,\n", cfg.struct_score, net.rate_tau);
+        fprintf(mf, "  \"rho_target\": %.3f,\n", cfg.rho_target);
         fprintf(mf, "  \"preset\": \"%s\", \"decode_mode\": %d, \"wta_k\": %d, \"reward_mode\": %d,\n",
                 cfg.preset.c_str(), cfg.decode_mode, cfg.wta_k, cfg.reward_mode);
         fprintf(mf, "  \"use_reward_baseline\": %d, \"tau_trace\": %.1f, \"trace_clamp\": %.2f,\n",
@@ -746,6 +786,20 @@ int main(int argc, char* argv[]) {
                ep, tx, ty, init_dist, final_dist, ratio, net.arm.reward,
                ticks_used, arrived ? 1 : 0, net.arm.theta1, net.arm.theta2);
         
+        /* v18（B2-struct）：episode 边界执行结构轮。内部早退：未到 struct_interval 的倍数时
+         * 只做统计窗口重置，开销≈0；struct_mode=0 时这段完全不进。 */
+        if (net.hp.struct_mode > 0) {
+            int s4[4] = {0, net.synapse_count, 0, 0};
+            int added = net2_struct_round(&net, ep + 1, s4);
+            if (added < 0) {
+                fprintf(stderr, "[struct] round failed at ep %d\n", ep + 1);
+            } else if (added > 0) {
+                printf("[struct] after ep %d: round #%d +%d edges -> S=%d | fanin min=%d med=%d\n",
+                       ep + 1, net.struct_rounds, added, s4[1], s4[2], s4[3]);
+                fflush(stdout);
+            }
+        }
+
         /* 诊断：每 50ep 打印 INPUT→MOTOR 权重统计 */
         if (ep % 50 == 49) {
             int m1b = net.input_count + net.hidden_count;
