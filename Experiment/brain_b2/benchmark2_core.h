@@ -37,6 +37,7 @@
 #define QUEUE_SIZE          8192
 #define WEIGHT_MIN          0.001
 #define WEIGHT_MAX          10.0
+#define EI_MAX_N            256      /* v22 B2-EI：IIN 群容量上限（host 校验 ei_n ≤ 此值） */
 #define MEMBRANE_REST       -65.0
 #define SPIKE_THRESHOLD     -55.0
 #define MEMBRANE_DECAY      0.95
@@ -91,6 +92,12 @@ typedef struct {
      * 只有显式打开 hetero_* 参数时运动层才会被扰动。 */
     double membrane_decay;   /* 默认 MEMBRANE_DECAY */
     double tuning_width;     /* 默认 1.0；decode_mode=2 时作为解码加权系数 */
+
+    /* v21（B2-ALIF A 路径，2026-11-19 签字）：脉冲频率适应状态。
+     * adapt_a 每 tick 乘 rho_a = exp(-1/tau_a)，发放时 +1；
+     * 判定阈值 thr = spike_threshold + alif_beta*adapt_a（不写回 spike_threshold，
+     * 保住 v6 异构阈值语义）。alif_beta=0 时既不衰减也不参与判定 → 旧路径逐位不变。 */
+    double adapt_a;          /* calloc 初值 0 */
 } Neuron2;
 
 /* ============================================================
@@ -205,6 +212,25 @@ typedef struct {
      *     rate_tau<=0 时自动置 tau=20 tick） */
     int    struct_score;
 
+    /* v21（B2-ALIF，2026-11-19 签字）：
+     * alif_beta = 适应强度（mV，默认 0 = 关闭 ⇒ 旧路径逐位不变）；
+     * alif_tau_a = 适应衰减时间常数（tick，默认 100 ⇒ rho_a=exp(-0.01)≈0.99005）。
+     * A 路径只改前向动力学：阈值 = spike_threshold + beta*adapt_a，不触碰 e-prop。 */
+    double alif_beta;
+    double alif_tau_a;
+    /* B 路径开关：0 = 仅前向适应（A 路径，默认）；1 = 叠加适应资格向量扣减（B 路径）。
+     * beta=0 时该开关无意义，两路径都退化为原网络。 */
+    int    alif_bpath;
+
+    /* v22（B2-EI，2026-11-20 签字）：IIN 侧抑制。
+     * ei_mode=0 默认关闭（旧路径逐位不变）；ei_n 群规模、ei_w 抑制电流强度、
+     * ei_tau IIN 膜衰减 tick。IIN 在 k-WTA 之前对 motor 膜电位注入负电流。 */
+    int    ei_mode;          /* 0=关 1=v22均匀二值 2=v23高斯连续 */
+    int    ei_n;
+    double ei_w;
+    double ei_tau;
+    double ei_sigma;         /* v23 高斯选择性宽度（默认 0.25） */
+
 } HyperParams2;
 
 /* ============================================================
@@ -298,6 +324,10 @@ typedef struct {
     double* ep_L;        /* 逐神经元学习信号 L_j（按神经元） */
     double* ep_z;        /* 逐神经元伪导数 z_j（按神经元） */
     int     ep_step;     /* ADAM 步数（偏置校正用） */
+    /* v21（B2-ALIF B 路径，2026-11-19 签字）：适应阈值资格向量 eps_a（按突触）。
+     * Bellec 2022 Eq.9：eps_a^t = rho_a·eps_a^{t-1} + e^{t-1}；e_eff = psi·(zbar − beta·eps_a)。
+     * beta=0 时不分配、不读写 ⇒ 旧路径逐位不变。 */
+    double* ep_eps_a;
 
     /* v18（B2-struct）：[input+hidden] × [motor] 共激活计数（饱和 uint16，≈5 MB）。
      * struct_mode=0 时不分配、不读写 ⇒ 旧路径逐位不变。 */
@@ -306,6 +336,21 @@ typedef struct {
     int coact_cols;
     int struct_rounds;   /* 已执行的结构轮数 */
     int struct_added;    /* 累计新增突触数 */
+
+    /* v21（B2-ALIF，Gate 0 操纵有效性）：累计发放计数（只统计 hidden+motor，
+     * 输入层是钳位编码层不计）。整数自增，不改变任何浮点轨迹 ⇒ beta=0 也逐位不变。
+     * host 在 episode 边界取差值 / ticks 得"每 tick 平均发放数"。 */
+    long long spike_count;
+
+    /* v22（B2-EI，2026-11-20 签字）：抑制性中间神经元（IIN）群。
+     * ei_mode=0 时不分配、不读写 ⇒ 旧路径逐位不变。
+     * IIN 是网络内部真实神经元：接收 hidden 群体发放驱动，膜电位衰减，
+     * 超自身阈值发放后对所有 motor 神经元注入 −ei_w·s_iin 的负电流（不是负权重，
+     * 不改 WEIGHT_MIN/clamp/资格迹/k-WTA 语义）。winner 仍在抑制后的膜电位上自主竞争。 */
+    /* 数组恒按 EI_MAX_N 分配（host 校验 hp.ei_n ≤ EI_MAX_N）；ei_mode=0 不读写。 */
+    double* ei_v;            /* IIN 膜电位 [EI_MAX_N] */
+    int*    ei_spk;          /* IIN 本 tick 是否发放 [EI_MAX_N] */
+    double  ei_drive_sum;    /* 诊断：本 tick hidden→IIN 驱动和 */
 } NetworkState2;
 
 /* ============================================================

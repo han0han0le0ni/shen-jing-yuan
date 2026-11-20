@@ -63,6 +63,19 @@ double rho_target = 0.0;   /* v20：H→H 目标谱半径，0=关闭（旧行为
     double eprop_alpha = 0.3;    /* 伪导数斜率 */
     double eprop_lr    = 1e-3;   /* ADAM 步长（P3 由单 seed 校准后写死） */
 
+    /* v21（B2-ALIF A 路径，2026-11-19 签字）：alif_beta=0 默认关闭 ⇒ 旧路径逐位不变。
+     * 只改前向动力学（阈值随发放适应），不触碰 e-prop。β 档只允许 {4,8}。 */
+    double alif_beta   = 0.0;
+    double alif_tau_a  = 100.0;
+    int    alif_bpath  = 0;      /* 0=A 路径（仅前向）；1=B 路径（叠加适应资格向量） */
+
+    /* v22（B2-EI，2026-11-20 签字）：IIN 侧抑制，默认关闭逐位不变 */
+    int    ei_mode = 0;
+    int    ei_n    = 0;
+    double ei_w    = 0.0;
+    double ei_tau  = 100.0;
+    double ei_sigma = 0.25;
+
     /* v18（B2-struct，2026-11-18 签字，audit/b2_struct_prereg_2026-11-18.md）
      * 0=关闭（默认，逐位不变） 1=活动依赖生长 2=随机生长（对照） 3=按索引补入度 */
     int    struct_mode     = 0;
@@ -240,6 +253,14 @@ int main(int argc, char* argv[]) {
                                            cfg.eprop_scope = (m == "im" || m == "I-M" || m == "i2m") ? 1 : 0; }
         else if (a == "--eprop-alpha")   nextf(cfg.eprop_alpha);
         else if (a == "--eprop-lr")      nextf(cfg.eprop_lr);
+        else if (a == "--alif-beta")     nextf(cfg.alif_beta);
+        else if (a == "--alif-tau-a")    nextf(cfg.alif_tau_a);
+        else if (a == "--alif-bpath")    { if (i+1<argc) cfg.alif_bpath = atoi(argv[++i]); }
+        else if (a == "--ei-mode")       { if (i+1<argc) cfg.ei_mode = atoi(argv[++i]); }
+        else if (a == "--ei-n")          { if (i+1<argc) cfg.ei_n = atoi(argv[++i]); }
+        else if (a == "--ei-w")          nextf(cfg.ei_w);
+        else if (a == "--ei-tau")        nextf(cfg.ei_tau);
+        else if (a == "--ei-sigma")      nextf(cfg.ei_sigma);
         else if (a == "--struct")        { if (i+1<argc) cfg.struct_mode = atoi(argv[++i]); }
         else if (a == "--struct-fmin")   { if (i+1<argc) cfg.struct_fmin = atoi(argv[++i]); }
         else if (a == "--struct-score")  { if (i+1<argc) cfg.struct_score = atoi(argv[++i]); }
@@ -390,6 +411,54 @@ int main(int argc, char* argv[]) {
     net.hp.eprop_scope = cfg.eprop_scope;
     net.hp.eprop_alpha = cfg.eprop_alpha;
     net.hp.eprop_lr    = cfg.eprop_lr;
+    /* v21（B2-ALIF A 路径）：前向适应开关（默认 0 ⇒ 旧路径逐位不变）。
+     * β 档只允许 {4,8}（预注册 §3）；其他值直接拒绝，防事后调参。 */
+    if (cfg.alif_beta != 0.0 && cfg.alif_beta != 4.0 && cfg.alif_beta != 8.0) {
+        fprintf(stderr, "ALIF beta must be 0 (off), 4, or 8 (got %g)\n", cfg.alif_beta);
+        net2_destroy(&net);
+        return 2;
+    }
+    if (cfg.alif_bpath != 0 && cfg.alif_bpath != 1) {
+        fprintf(stderr, "ALIF bpath must be 0 (A) or 1 (B)\n");
+        net2_destroy(&net);
+        return 2;
+    }
+    net.hp.alif_beta  = cfg.alif_beta;
+    net.hp.alif_tau_a = cfg.alif_tau_a;
+    net.hp.alif_bpath = cfg.alif_bpath;
+    if (cfg.alif_beta > 0.0) {
+        printf("v21 ALIF: beta=%.1f mV tau_a=%.1f rho_a=%.6f path=%s\n",
+               cfg.alif_beta, cfg.alif_tau_a, exp(-1.0 / cfg.alif_tau_a),
+               cfg.alif_bpath ? "B (forward + adaptive eligibility)" : "A (forward only)");
+    }
+    /* v22（B2-EI）：IIN 侧抑制。默认关闭；开启时校验档位与容量。 */
+    if (cfg.ei_mode != 0 && cfg.ei_mode != 1 && cfg.ei_mode != 2) {
+        fprintf(stderr, "EI mode must be 0 (off), 1 (v22 uniform), or 2 (v23 gaussian)\n");
+        net2_destroy(&net);
+        return 2;
+    }
+    if (cfg.ei_n < 0 || cfg.ei_n > 256) {
+        fprintf(stderr, "EI n must be in [0,256] (EI_MAX_N)\n");
+        net2_destroy(&net);
+        return 2;
+    }
+    if (cfg.ei_mode == 1 && cfg.ei_n <= 0) {
+        fprintf(stderr, "EI mode=1 requires ei_n>0\n");
+        net2_destroy(&net);
+        return 2;
+    }
+    net.hp.ei_mode = cfg.ei_mode;
+    net.hp.ei_n    = cfg.ei_n;
+    net.hp.ei_w    = cfg.ei_w;
+    net.hp.ei_tau  = cfg.ei_tau;
+    net.hp.ei_sigma = cfg.ei_sigma;
+    if (cfg.ei_mode == 2) {
+        printf("v23 EI2: mode=2 n=%d w=%.2f tau=%.1f sigma=%.2f (gaussian selective + activity-dependent)\n",
+               cfg.ei_n, cfg.ei_w, cfg.ei_tau, cfg.ei_sigma);
+    } else if (cfg.ei_mode == 1) {
+        printf("v22 EI: mode=1 n=%d w=%.2f tau=%.1f (IIN uniform lateral inhibition)\n",
+               cfg.ei_n, cfg.ei_w, cfg.ei_tau);
+    }
     /* v18（B2-struct）：结构可塑开关（默认 0 ⇒ 旧路径逐位不变） */
     net.hp.struct_mode     = cfg.struct_mode;
     net.hp.struct_fmin     = cfg.struct_fmin;
@@ -542,6 +611,13 @@ int main(int argc, char* argv[]) {
     if (mf) {
         std::string out_j = cfg.out_csv;
         for (char& ch : out_j) if (ch == '\\') ch = '/';
+        /* D6（2026-11-18 记录，2026-11-19 修复）：路径字段须与 out_csv 同样转义，
+         * 否则 Windows 反斜杠（E:\...）在 JSON 字符串中构成非法转义，json.load 失败。
+         * 默认空串时输出与修复前逐位一致。 */
+        std::string sw_j = cfg.save_weights, lw_j = cfg.load_weights, tc_j = cfg.trace_cmd;
+        for (char& ch : sw_j) if (ch == '\\') ch = '/';
+        for (char& ch : lw_j) if (ch == '\\') ch = '/';
+        for (char& ch : tc_j) if (ch == '\\') ch = '/';
         fprintf(mf, "{\n");
         fprintf(mf, "  \"benchmark\": 2,\n");
         fprintf(mf, "  \"build\": \"%s %s\",\n", __DATE__, __TIME__);
@@ -569,13 +645,18 @@ int main(int argc, char* argv[]) {
         fprintf(mf, "  \"lr_scale\": %.4f, \"weight_scale\": %.4f,\n",
                 cfg.lr_scale, cfg.weight_scale);
         fprintf(mf, "  \"save_weights\": \"%s\", \"load_weights\": \"%s\", \"trace_cmd\": \"%s\", \"trace_stride\": %d,\n",
-                cfg.save_weights.c_str(), cfg.load_weights.c_str(), cfg.trace_cmd.c_str(), cfg.trace_stride);
+                sw_j.c_str(), lw_j.c_str(), tc_j.c_str(), cfg.trace_stride);
         fprintf(mf, "  \"eprop\": %d, \"eprop_scope\": %d, \"eprop_alpha\": %.4f, \"eprop_lr\": %.6f,\n",
                 cfg.eprop, cfg.eprop_scope, cfg.eprop_alpha, cfg.eprop_lr);
         fprintf(mf, "  \"struct_mode\": %d, \"struct_fmin\": %d, \"struct_interval\": %d, \"struct_added\": %d,\n",
                 cfg.struct_mode, cfg.struct_fmin, cfg.struct_interval, net.struct_added);
         fprintf(mf, "  \"struct_score\": %d, \"rate_tau\": %.1f,\n", cfg.struct_score, net.rate_tau);
         fprintf(mf, "  \"rho_target\": %.3f,\n", cfg.rho_target);
+        fprintf(mf, "  \"alif_beta\": %.2f, \"alif_tau_a\": %.2f, \"alif_rho_a\": %.6f, \"alif_bpath\": %d,\n",
+                cfg.alif_beta, cfg.alif_tau_a,
+                cfg.alif_tau_a > 0.0 ? exp(-1.0 / cfg.alif_tau_a) : 0.0, cfg.alif_bpath);
+        fprintf(mf, "  \"ei_mode\": %d, \"ei_n\": %d, \"ei_w\": %.2f, \"ei_tau\": %.1f, \"ei_sigma\": %.2f,\n",
+                cfg.ei_mode, cfg.ei_n, cfg.ei_w, cfg.ei_tau, cfg.ei_sigma);
         fprintf(mf, "  \"preset\": \"%s\", \"decode_mode\": %d, \"wta_k\": %d, \"reward_mode\": %d,\n",
                 cfg.preset.c_str(), cfg.decode_mode, cfg.wta_k, cfg.reward_mode);
         fprintf(mf, "  \"use_reward_baseline\": %d, \"tau_trace\": %.1f, \"trace_clamp\": %.2f,\n",
@@ -605,6 +686,9 @@ int main(int argc, char* argv[]) {
     std::vector<int> arrival_ticks;
     
     const int rom_base = net.use_reward_modulation;
+    /* v21（B2-ALIF Gate 0）：hidden+motor 每 tick 平均发放数累计（只写 meta/stdout，
+     * 不改 CSV 列）。beta=0 时同样统计，供同口径对比。 */
+    long long gate0_spk_sum = 0, gate0_tick_sum = 0;
     for (int ep = 0; ep < cfg.episodes; ep++) {
         double tx, ty;
         gen_target(cfg, ep, &tx, &ty);
@@ -665,6 +749,7 @@ int main(int argc, char* argv[]) {
          * v7：--budget N 时改为固定预算（§0.3），到达也不提前结束。 */
         int ep_limit = (cfg.budget > 0) ? cfg.budget
                                        : (cfg.speed_mode ? cfg.max_ticks_per_ep : cfg.score_horizon);
+        long long spk_t0 = (long long)net2_get_param(&net, "spike_count");
         for (int t = 0; ep_limit <= 0 || t < ep_limit; t++) {
             /* v10（T2e 采集）：每 retarget tick 换一个新随机目标，避免手臂到点后长期停住
              * 造成「绝大多数样本 ω*≈0」的退化分布。仅影响采集，不影响评估口径。 */
@@ -762,6 +847,10 @@ int main(int argc, char* argv[]) {
             prev_ex = cur_ex; prev_ey = cur_ey;
         }
         
+        /* v21（Gate 0）：统计本 episode 的 hidden+motor 每 tick 平均发放数 */
+        long long spk_t1 = (long long)net2_get_param(&net, "spike_count");
+        gate0_spk_sum += (spk_t1 - spk_t0);
+        gate0_tick_sum += ticks_used;
         double final_dist = sqrt((net.arm.end_x - tx)*(net.arm.end_x - tx) +
                                  (net.arm.end_y - ty)*(net.arm.end_y - ty));
         final_dists.push_back(final_dist);
@@ -846,6 +935,34 @@ int main(int argc, char* argv[]) {
     double min_ratio = ratios.front();
     double max_ratio = ratios.back();
     
+    /* v21（B2-ALIF Gate 0）：放电率操纵有效性，写 sidecar（不改 CSV 列）。
+     * Gate 0 条件：beta=4 的每 tick 平均发放数比 beta=0 下降 ≥10%。 */
+    double gate0_rate = (gate0_tick_sum > 0)
+                        ? (double)gate0_spk_sum / (double)gate0_tick_sum : 0.0;
+    printf("\n=== ALIF GATE 0 (firing-rate manipulation check) ===\n");
+    printf("  beta=%.2f tau_a=%.1f rho_a=%.6f | hidden+motor spikes/tick=%.4f (n_spk=%lld n_tick=%lld)\n",
+           cfg.alif_beta, cfg.alif_tau_a,
+           cfg.alif_tau_a > 0.0 ? exp(-1.0 / cfg.alif_tau_a) : 0.0,
+           gate0_rate, gate0_spk_sum, gate0_tick_sum);
+    {
+        std::string g0 = cfg.out_csv + ".gate0.json";
+        FILE* gf = fopen(g0.c_str(), "w");
+        if (gf) {
+            std::string gj = g0;
+            for (char& ch : gj) if (ch == '\\') ch = '/';
+            fprintf(gf, "{\n  \"gate0_csv\": \"%s\",\n", gj.c_str());
+            fprintf(gf, "  \"alif_beta\": %.2f, \"alif_tau_a\": %.2f, \"alif_rho_a\": %.6f, \"alif_bpath\": %d,\n",
+                    cfg.alif_beta, cfg.alif_tau_a,
+                    cfg.alif_tau_a > 0.0 ? exp(-1.0 / cfg.alif_tau_a) : 0.0, cfg.alif_bpath);
+            fprintf(gf, "  \"spikes\": %lld, \"ticks\": %lld, \"spikes_per_tick\": %.6f,\n",
+                    gate0_spk_sum, gate0_tick_sum, gate0_rate);
+            fprintf(gf, "  \"med_ratio\": %.4f, \"mean_ratio\": %.4f,\n",
+                    median_ratio, mean_ratio);
+            fprintf(gf, "  \"episodes\": %d, \"seed\": %u\n}\n", cfg.episodes, cfg.seed);
+            fclose(gf);
+        }
+    }
+
     printf("\n=== FINAL RESULTS ===\n");
     printf("Ratio (final/initial distance):\n");
     printf("  Median: %.4f\n", median_ratio);

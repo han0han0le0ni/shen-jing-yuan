@@ -551,7 +551,8 @@ int net2_init_ex(NetworkState2* net, int input_n, int hidden_n,
     net->ep_v = (double*)calloc((size_t)(net->synapse_count > 0 ? net->synapse_count : 1), sizeof(double));
     net->ep_L = (double*)calloc((size_t)(net->neuron_count > 0 ? net->neuron_count : 1), sizeof(double));
     net->ep_z = (double*)calloc((size_t)(net->neuron_count > 0 ? net->neuron_count : 1), sizeof(double));
-    if (!net->ep_m || !net->ep_v || !net->ep_L || !net->ep_z) { net2_destroy(net); return -1; }
+    net->ep_eps_a = (double*)calloc((size_t)(net->synapse_count > 0 ? net->synapse_count : 1), sizeof(double));
+    if (!net->ep_m || !net->ep_v || !net->ep_L || !net->ep_z || !net->ep_eps_a) { net2_destroy(net); return -1; }
 
     /* v18（B2-struct）：结构可塑。默认全关；coact 延迟到 struct_mode>0 的第一次 tick 才分配，
      * 因此 struct_mode=0 时既无额外内存也无任何读写 ⇒ 旧路径逐位不变。 */
@@ -563,6 +564,19 @@ int net2_init_ex(NetworkState2* net, int input_n, int hidden_n,
     net->hp.struct_budget     = 0.20;
     net->hp.struct_round_frac = 0.02;
     net->hp.struct_score      = 0;      /* v19：0=coact（旧，逐位不变） */
+    /* v21（B2-ALIF A 路径）：beta=0 关闭 ⇒ 旧路径逐位不变 */
+    net->hp.alif_beta         = 0.0;
+    net->hp.alif_tau_a        = 100.0;
+    net->hp.alif_bpath        = 0;
+    /* v22（B2-EI）：默认关闭 ⇒ 旧路径逐位不变 */
+    net->hp.ei_mode           = 0;
+    net->hp.ei_n              = 0;
+    net->hp.ei_w              = 0.0;
+    net->hp.ei_tau            = 100.0;
+    net->hp.ei_sigma          = 0.25;
+    net->ei_v  = (double*)calloc((size_t)EI_MAX_N, sizeof(double));
+    net->ei_spk = (int*)calloc((size_t)EI_MAX_N, sizeof(int));
+    if (!net->ei_v || !net->ei_spk) { net2_destroy(net); return -1; }
     net->coact = NULL;
     net->coact_rows = 0;
     net->coact_cols = 0;
@@ -620,6 +634,9 @@ void net2_destroy(NetworkState2* net) {
     if (net->ep_v) free(net->ep_v);
     if (net->ep_L) free(net->ep_L);
     if (net->ep_z) free(net->ep_z);
+    if (net->ep_eps_a) free(net->ep_eps_a);
+    if (net->ei_v) free(net->ei_v);
+    if (net->ei_spk) free(net->ei_spk);
     if (net->coact) free(net->coact);
     memset(net, 0, sizeof(NetworkState2));
 }
@@ -723,6 +740,15 @@ static double stdp_kernel2(NetworkState2* net, double dt) {
  * Tick 核心
  * ============================================================ */
 void net2_tick(NetworkState2* net) {
+    /* v21（B2-ALIF A 路径，2026-11-19 签字）：适应衰减因子每 tick 算一次。
+     * beta=0 时下方所有适应分支都不进入 → 旧路径逐位不变。
+     * 实现决策（记入预注册 §8）：适应只作用于 hidden + motor（k-WTA winner 所在的
+     * 可整合层）；输入层是钳位刺激编码层（Step 0 每 tick 直接重写膜电位），施加
+     * 适应会使其迅速静默、毁掉刺激通路，故豁免。 */
+    const double alif_rho = (net->hp.alif_beta > 0.0 && net->hp.alif_tau_a > 0.0)
+                            ? exp(-1.0 / net->hp.alif_tau_a) : 0.0;
+    const int alif_on = (net->hp.alif_beta > 0.0);
+    int hidden_spike_sum = 0;   /* v22 E-I：本 tick hidden 发放数（整数，ei_mode=0 时也不影响浮点） */
     /* ═══════════════════════════════════════════════════════
      * REWARD QUEUE：tick **开头** 处理上一 tick host 注入的 reward
      * 关键时序对齐：
@@ -900,6 +926,11 @@ void net2_tick(NetworkState2* net) {
         net->neurons[i].is_spiking = 0;
         
         Neuron2* n = &net->neurons[i];
+        /* v21 ALIF：循环开头先衰减适应状态（仅 hidden/motor，输入层豁免）。
+         * alif_on=false 时整段跳过，adapt_a 恒为 0 → 旧路径逐位不变。 */
+        if (alif_on && n->type != NT_INPUT_X && n->type != NT_INPUT_PROP) {
+            n->adapt_a *= alif_rho;
+        }
         /* 输入层（位置+本体感觉）：不衰减（持续刺激），但必须做发放判定！ */
         if (n->type != NT_INPUT_X && n->type != NT_INPUT_PROP) {
             /* 不应期 */
@@ -925,9 +956,16 @@ void net2_tick(NetworkState2* net) {
             }
         }
         
-        /* 发放判定（先标记，后统一处理 WTA 和膜电位重置） */
-        if (n->membrane_potential >= n->spike_threshold) {
+        /* 发放判定（先标记，后统一处理 WTA 和膜电位重置）
+         * v21 ALIF：阈值 = 静态阈值 + beta×适应状态；beta=0 时 thr 严格等于
+         * n->spike_threshold，判定逐位不变。 */
+        double thr = n->spike_threshold;
+        if (alif_on && n->type != NT_INPUT_X && n->type != NT_INPUT_PROP) {
+            thr += net->hp.alif_beta * n->adapt_a;
+        }
+        if (n->membrane_potential >= thr) {
             n->is_spiking = 1;
+            if (n->type == NT_HIDDEN) hidden_spike_sum++;   /* v22 E-I 驱动 */
             /* v17（M4）：伪导数（在重置之前捕获）。
              * 偏离记录：预注册写的是 Bellec 分段线性式 z=α·max(0,1−|v−θ|/(θ−v_rest))，
              * 但本网络 EPSP = PSP_FACTOR×w = 25–75 mV 远大于阈值间隔 10 mV，跨阈时过冲常达
@@ -936,6 +974,59 @@ void net2_tick(NetworkState2* net) {
              * 见 audit/m4_eprop_report。 */
             if (net->hp.eprop_mode) {
                 net->ep_z[i] = net->hp.eprop_alpha;
+            }
+        }
+    }
+
+    /* v22（B2-EI，2026-11-20 签字）：IIN 侧抑制，在 k-WTA 之前对 motor 膜电位注入负电流。
+     * IIN 是网络内部真实神经元：驱动 = 本 tick hidden 群体发放率（Step2 已更新 is_spiking）。
+     * 膜电位衰减 + 驱动累积，超自身阈值发放后按确定性均匀分区抑制对应 motor 段
+     * （IIN k → motor 索引 [k*M/n,(k+1)*M/n)，覆盖全部、结构对称，非手工选边）。
+     * ei_mode=0 时整段跳过 ⇒ 旧路径逐位不变；不碰权重/clamp/资格迹/k-WTA 语义，
+     * winner 仍在抑制后的膜电位上由 k-WTA 自主排序产生。 */
+    if (net->hp.ei_mode >= 1 && net->hp.ei_n > 0) {
+        int n_iin = net->hp.ei_n;
+        if (n_iin > EI_MAX_N) n_iin = EI_MAX_N;
+        double ei_decay = (net->hp.ei_tau > 0.0) ? exp(-1.0 / net->hp.ei_tau) : 0.0;
+        double drive = (net->hidden_count > 0)
+                       ? (double)hidden_spike_sum / (double)net->hidden_count : 0.0;
+        net->ei_drive_sum = drive;
+        int m1_base = net->input_count + net->hidden_count;
+        int m2_base = m1_base + net->motor1_count;
+        int m_total = net->motor1_count + net->motor2_count;
+        int mode2 = (net->hp.ei_mode == 2);
+        double inv_2sig2 = (net->hp.ei_sigma > 0.0)
+                           ? 1.0 / (2.0 * net->hp.ei_sigma * net->hp.ei_sigma) : 0.0;
+        for (int k = 0; k < n_iin; k++) {
+            double ei_thr = 0.10 + 0.80 * (double)(k + 1) / (double)n_iin;
+            net->ei_v[k] = ei_decay * net->ei_v[k] + drive;
+            net->ei_spk[k] = 0;
+            if (net->ei_v[k] < ei_thr) continue;   /* 未达阈值：本 tick 不注入 */
+            double amt = net->ei_v[k];             /* 活动依赖：注入量随 IIN 活动连续变化 */
+            net->ei_v[k] = 0.0;                    /* 硬重置 */
+            net->ei_spk[k] = 1;
+            if (!mode2) {
+                /* v22 均匀硬分区（保持可复现） */
+                int lo = (int)((long long)k * m_total / n_iin);
+                int hi = (int)((long long)(k + 1) * m_total / n_iin);
+                if (hi > m_total) hi = m_total;
+                for (int m = lo; m < hi; m++) {
+                    net->neurons[m1_base + m].membrane_potential -= net->hp.ei_w;
+                }
+            } else {
+                /* v23 高斯选择性：IIN 中心偏好 c_k 均匀覆盖 [-0.5,0.5]，
+                 * 对每层 motor 按 |c_k − pref_j| 高斯加权；注入量 ∝ ei_w·amt·g/n。 */
+                double c_k = -0.5 + (double)(k + 0.5) / (double)n_iin;
+                double scale = net->hp.ei_w * amt / (double)n_iin;
+                for (int layer = 0; layer < 2; layer++) {
+                    int base = (layer == 0) ? m1_base : m2_base;
+                    int cnt  = (layer == 0) ? net->motor1_count : net->motor2_count;
+                    for (int j = 0; j < cnt; j++) {
+                        double dp = c_k - net->neurons[base + j].pref_omega;
+                        double g = exp(-dp * dp * inv_2sig2);
+                        net->neurons[base + j].membrane_potential -= scale * g;
+                    }
+                }
             }
         }
     }
@@ -1015,6 +1106,10 @@ void net2_tick(NetworkState2* net) {
         n->last_spike_tick = net->current_tick;
         if (n->type != NT_INPUT_X && n->type != NT_INPUT_PROP) {
             n->refractory_remaining = REFRACTORY_TICKS;
+            /* v21 ALIF：每发放一次，适应状态 +1（仅 hidden/motor）。
+             * WTA 已在此前把非 winner 的 is_spiking 清零，故只有实际 winner 累加。 */
+            if (alif_on) n->adapt_a += 1.0;
+            net->spike_count++;   /* Gate 0：hidden+motor 发放计数，整数自增 */
         }
         n->membrane_potential = MEMBRANE_REST;
     }
@@ -1249,6 +1344,18 @@ void net2_tick(NetworkState2* net) {
             double lam = net->hp.lambda_trace * 0.95;   /* 迹的 tick 衰减 */
             double tc = net->hp.trace_clamp;
             int scope_im_only = (net->hp.eprop_scope == 1);
+            /* v21（B2-ALIF B 路径）：适应资格向量递推参数。
+             * 实现诠释（记入 §8 偏离）：eps_a 是资格迹 e 的指数滑动平均（低通），
+             *   eps_a^t = rho_a·eps_a^{t-1} + (1−rho_a)·e^{t-1}，
+             * 代表"过去资格迹对当前适应阈值的贡献"（−beta·da/dv 的积分效应）；
+             *   e_eff = e − beta_eff·eps_a（与 e 同量纲）。
+             * 2026-11-19 首次实现误用 eps_a=rho·eps_a+e（无 (1−rho) 归一化），
+             * 在 tau_a=100(rho=0.99) 下放大 100× 致 medR 崩溃(3.47)，已修正为上述低通形式。
+             * beta_eff = beta/(v_th−v_rest) = beta/10：论文 beta 无量纲，本仓库 beta 为 mV，
+             * 按阈值间隔 10 mV 归一。beta=0 时整段跳过 ⇒ 旧路径逐位不变。 */
+            int adapt_on = (net->hp.alif_beta > 0.0 && net->hp.alif_bpath == 1);
+            double adapt_rho = (net->hp.alif_tau_a > 0.0) ? exp(-1.0 / net->hp.alif_tau_a) : 0.0;
+            double beta_eff = net->hp.alif_beta / 10.0;
             /* 资格迹 = Σ_{t'≤t} λ^{t−t'}·z_post(t')·ē_pre(t')，**每 tick 更新并施加一次 ADAM**。
              * 早期实现把 ADAM 放在"后突触发放的那一 tick"，等价于每 tick 数千次步进，
              * lr=1e-3 时 80 ep 内 H→H 99.94% 顶到 10（发散）；
@@ -1258,6 +1365,7 @@ void net2_tick(NetworkState2* net) {
                 Synapse2* sy = &net->synapses[s];
                 Neuron2* pre = &net->neurons[sy->pre_id];
                 Neuron2* post = &net->neurons[sy->post_id];
+                double prev_e = sy->eligibility_trace;   /* e^{t-1}，供适应资格向量递推 */
                 sy->eligibility_trace *= lam;
                 if (pre->is_spiking && post->is_spiking) {
                     sy->eligibility_trace += net->ep_z[sy->post_id];
@@ -1272,6 +1380,14 @@ void net2_tick(NetworkState2* net) {
                     if (!(pre_in && post_m)) continue;
                 }
                 double ct = sy->eligibility_trace;
+                /* v21（B 路径）：适应阈值对资格迹的扣减（修正版，低通）。
+                 * eps_a^t = rho_a·eps_a^{t-1} + (1−rho_a)·e^{t-1}：资格迹的低通记忆；
+                 * e_eff = e − beta_eff·eps_a（同量纲）。只改 ct（进 ADAM 的有效迹），
+                 * 不改 sy->eligibility_trace 本体递推 ⇒ beta=0 时 ct 严格等于原值。 */
+                if (adapt_on) {
+                    net->ep_eps_a[s] = adapt_rho * net->ep_eps_a[s] + (1.0 - adapt_rho) * prev_e;
+                    ct -= beta_eff * net->ep_eps_a[s];
+                }
                 if (ct > -1e-9 && ct < 1e-9) continue;   /* 迹近零 → 本 tick 无梯度 */
                 double g = net->ep_L[sy->post_id] * ct;
                 if (g == 0.0) continue;
@@ -1391,7 +1507,12 @@ int net2_struct_round(NetworkState2* net, int ep, int* out4) {
         tmp = (double*)realloc(net->ep_v, (size_t)ns * sizeof(double));
         if (!tmp) { fail = 1; goto done; }
         net->ep_v = tmp;
-        for (i = net->synapse_count; i < ns; i++) { net->ep_m[i] = 0.0; net->ep_v[i] = 0.0; }
+        tmp = (double*)realloc(net->ep_eps_a, (size_t)ns * sizeof(double));
+        if (!tmp) { fail = 1; goto done; }
+        net->ep_eps_a = tmp;
+        for (i = net->synapse_count; i < ns; i++) {
+            net->ep_m[i] = 0.0; net->ep_v[i] = 0.0; net->ep_eps_a[i] = 0.0;
+        }
     }
 
     if (hp->struct_mode == 2) {
@@ -1804,6 +1925,7 @@ int net2_set_param(NetworkState2* net, const char* name, double value) {
             int i;
             for (i = 0; i < net->synapse_count; i++) {
                 net->ep_m[i] = 0.0; net->ep_v[i] = 0.0;
+                net->ep_eps_a[i] = 0.0;
                 net->synapses[i].eligibility_trace = 0.0;
             }
             for (i = 0; i < net->neuron_count; i++) { net->ep_L[i] = 0.0; net->ep_z[i] = 0.0; }
@@ -1844,6 +1966,31 @@ int net2_set_param(NetworkState2* net, const char* name, double value) {
         /* v19（D5 修复）：0=coact（旧，逐位不变） 1=rate[] */
         if (value != 0.0 && value != 1.0) return -1;
         hp->struct_score = (int)value;
+    } else if (b2_param_is(name, "alif_beta")) {
+        /* v21（B2-ALIF A 路径）：0=关闭（旧，逐位不变）；β 档只允许 4/8 */
+        if (value < 0.0 || value > 20.0) return -1;
+        hp->alif_beta = value;
+    } else if (b2_param_is(name, "alif_tau_a")) {
+        if (value <= 0.0 || value > 100000.0) return -1;
+        hp->alif_tau_a = value;
+    } else if (b2_param_is(name, "alif_bpath")) {
+        if (value != 0.0 && value != 1.0) return -1;
+        hp->alif_bpath = (int)value;
+    } else if (b2_param_is(name, "ei_mode")) {
+        if (value != 0.0 && value != 1.0) return -1;
+        hp->ei_mode = (int)value;
+    } else if (b2_param_is(name, "ei_n")) {
+        if (value < 0.0 || value > EI_MAX_N) return -1;
+        hp->ei_n = (int)value;
+    } else if (b2_param_is(name, "ei_w")) {
+        if (value < 0.0 || value > 100.0) return -1;
+        hp->ei_w = value;
+    } else if (b2_param_is(name, "ei_tau")) {
+        if (value <= 0.0 || value > 100000.0) return -1;
+        hp->ei_tau = value;
+    } else if (b2_param_is(name, "ei_sigma")) {
+        if (value <= 0.0 || value > 10.0) return -1;
+        hp->ei_sigma = value;
     } else {
         return -1;
     }
@@ -1890,6 +2037,16 @@ double net2_get_param(const NetworkState2* net, const char* name) {
     B2_GET("prop_mode", hp->prop_mode);
     B2_GET("hetero_thresh", hp->hetero_thresh);
     B2_GET("hetero_tune", hp->hetero_tune);
+    B2_GET("alif_beta", hp->alif_beta);
+    B2_GET("alif_tau_a", hp->alif_tau_a);
+    B2_GET("alif_bpath", (double)hp->alif_bpath);
+    B2_GET("ei_mode", (double)hp->ei_mode);
+    B2_GET("ei_n", (double)hp->ei_n);
+    B2_GET("ei_w", hp->ei_w);
+    B2_GET("ei_tau", hp->ei_tau);
+    B2_GET("ei_sigma", hp->ei_sigma);
+    B2_GET("ei_drive_sum", net->ei_drive_sum);
+    B2_GET("spike_count", (double)net->spike_count);
     B2_GET("cf_err1", net->cf_err1);
     B2_GET("cf_err2", net->cf_err2);
 #undef B2_GET
