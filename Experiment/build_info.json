@@ -1,5 +1,5 @@
 {
-    "built_at":  "2026-11-20T17:50:24",
+    "built_at":  "2026-11-21T18:43:57",
     "compiler":  "gcc.exe (MinGW-W64 x86_64-ucrt-posix-seh, built by Brecht Sanders, r4) 16.1.0",
     "macros":  "defaults from headers: ELIGIBILITY_TRACE_ENABLE=1, REWARD_MODULATION_ENABLE=1",
     "commands":  [
@@ -23,24 +23,24 @@
                     "brain\\benchmark1_sym.c":  "5811b09ddf98c013131f487c3d5ff167d3541d03ae6c672ea5c003c0bbee784e",
                     "brain\\benchmark1_ssp.c":  "2b48449c2bdd6d8467e448fad21ad4d70dcfa9d7364313d141c7f49356f24d35",
                     "brain\\benchmark1_psel.c":  "9eefa192e4a5d3ad234b6ebfb3d4799e1a35ff09f91c2a6bfcb43fa7ddb69818",
-                    "brain_b2\\benchmark2_core.c":  "99dae4c0ba6490348285a47ad3026f1a709e44b6b3e9c20664f10e70fe1f59ac",
-                    "brain_b2\\benchmark2_core.h":  "15400d73a6e3279814c3a466c62cd0e2abbf24b1c26ec71d34ed994c8bdc610d",
+                    "brain_b2\\benchmark2_core.c":  "006ac16e0805e27a2c0ede3bbae6c161ef453b9f299de7a3788de707bab9a5cd",
+                    "brain_b2\\benchmark2_core.h":  "5047d94d6e8906e13018c851cff3122c82e7967bc876c55bb2000d37f499b551",
                     "brain\\benchmark1_fwd.c":  "032bc93a4ab484fc0afe5c63a6bcc71a91fcc5bb7dc7913db4fb26f5ea7d7020",
                     "brain\\benchmark1_core.c":  "1f9413c0dce95c54aacc77ca723fd2e79a1ed1dd5dc716dea1c766668d048301",
-                    "host_b2\\benchmark2_host.cpp":  "eda839f6fbb3ca147017686be4ab5f87c2571e7c7faf8cc5c6c356c707e76d36",
+                    "host_b2\\benchmark2_host.cpp":  "7c5b34a325f48449238075a8d5fd6c8c4ab68ca808e470817272b5ae8dd64d07",
                     "host\\benchmark1_host.cpp":  "c61e3120da39326b971b79272bf3d76931bdcdda1d5c0355f55463476ebc4983",
                     "brain\\benchmark1_t1.c":  "0fbef45ed33ab4773c6f1b9debc76788bdf0f1086d47e9d5c53ec044f0015f74"
                 },
     "artifacts":  {
-                      "b1_probe.dll":  "0277faa9ab75544364c9165babe0668b45ce4e261a172cf8db382856d3245d9f",
-                      "benchmark2.exe":  "6c5f46f2c2ed334f8744053ea7b10c7640076c35f3b7d8e6b2cd9ad063159911",
-                      "b2_core.o":  "fb5364b64669d4e21185cbaa8792b684180cddf9754560ef5456c433f5d16c99",
-                      "b1_psel.dll":  "c55abd8dbb3c80623a90eaeda44e14e254dc18447e8ce3b63363b04311afe6b5",
-                      "b1_ssp.dll":  "2d35d28f2085403894db83f0a37a514d4c9247551fdfa1eb1e114866acea7e15",
-                      "benchmark1.exe":  "75134a2437d44843cb8e407f9632fc81b0301845af26f0d827ebe9db8ac79f0a",
-                      "b1_t1.dll":  "7a945797ea9441f76dd1a8d69240edfd5fa5748907367ede5fa615a8ebf83a56",
-                      "b1_fwd.dll":  "5078fe92e958626a08728939a6f37594cf9f426b047733cd859a2bdeb1d31afe",
-                      "b1_sym.dll":  "6ef8691c6930f47155f60539eb0ed0a71f66d40d05eed71de9613aa2a010f34f",
-                      "b2_core.dll":  "bcdacd0eb6cfc73b062c028a1613c76b206ab79f376791a0420250e2cf4f8e8a"
+                      "b1_probe.dll":  "5665c054ed754a18d077e77d19fd5fa68a6ba464b231d3a4a7a296cf4f70c85d",
+                      "benchmark2.exe":  "210bd653d79566b61ba9434af2d030511eb65edb82cefe099ac07088831300bb",
+                      "b2_core.o":  "14f770da1854cb33a6bfcf890733a5fab0d1668cc5c935d409a3614f024958c1",
+                      "b1_psel.dll":  "cc657320e7f8049de09790e36e945880ed4320b12e1b0b1dfc148e83f8494345",
+                      "b1_ssp.dll":  "aabf2444153d406fbfc00d4a647f4636dbc4b256f2a596a6d4d99e6796542694",
+                      "benchmark1.exe":  "b74f2ce9b1fb707092f4842ded4bf666e58d8bbe2413a800d03b612f8de2fb81",
+                      "b1_t1.dll":  "fffadb4dd4a88b342614dfb076155647ce9dd9ee4bfd1877a12feda779b1ab69",
+                      "b1_fwd.dll":  "e4e49b2ddf510a04cbb24a9c9739b5140b0f03ded2484fa69d88b1d4e78536c8",
+                      "b1_sym.dll":  "20dbc310106fb860e3ff4ed864fc3dcb5680fea69edc21c204ab9d4067849304",
+                      "b2_core.dll":  "1304689e83e452fd9b4996cb4b68592afe01076f7fb9e44ba3bffd94fbb3537e"
                   }
 }

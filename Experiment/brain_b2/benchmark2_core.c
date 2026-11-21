@@ -93,6 +93,17 @@ static int struct_cmp_cand(const void* a, const void* b) {
 static double g_ema_o1 = 0.0, g_ema_o2 = 0.0;
 void net2_reset_ema(void) { g_ema_o1 = 0.0; g_ema_o2 = 0.0; }
 
+/* v25（B2-startpose）：起始位形扰动的独立 RNG 流，仿 g_het_rand。
+ * 不消耗主 g_rand ⇒ start_jitter=0 时旧路径逐位不变。
+ * 静态种子固定 → 每次进程、每个 seed 得到同一组起点扰动（确定性、可按 seed 复现对比）。 */
+static unsigned int g_start_rand = 0u;
+static inline double start_u(void) {
+    g_start_rand = g_start_rand * 1664525u + 1013904223u;
+    return (double)((g_start_rand >> 8) & 0xFFFFFF) / 16777216.0;
+}
+/* 由主 seed 派生一个固定起点种子，避免不同 seed 用同一组扰动。 */
+static void start_seed(unsigned int master) { g_start_rand = master ^ 0x5A17C0DEu; }
+
 /* ============================================================
  * v6 异构群体编码：独立于主 RNG，避免打开 hetero_* 时
  * 消耗 g_rand 而污染 A/B 对照的随机序列。
@@ -176,15 +187,37 @@ double arm_reward(const ArmState* arm) {
     return 1.0 - clamp2(normalized, 0.0, 1.0);
 }
 
+/* v25：按 start_jitter 设置起始关节角并重算末端正运动学。
+ * jitter=0 时严格写 (0,0)/(2,0) ⇒ 旧路径逐位不变（不调用 start_u，不改 RNG 状态）。 */
+static void arm_set_start(ArmState* arm, double jitter) {
+    if (jitter > 0.0) {
+        arm->theta1 = (2.0 * start_u() - 1.0) * jitter;
+        arm->theta2 = (2.0 * start_u() - 1.0) * jitter;
+    } else {
+        arm->theta1 = 0.0;
+        arm->theta2 = 0.0;
+    }
+    arm->end_x = ARM_L1 * cos(arm->theta1) + ARM_L2 * cos(arm->theta1 + arm->theta2);
+    arm->end_y = ARM_L1 * sin(arm->theta1) + ARM_L2 * sin(arm->theta1 + arm->theta2);
+}
+
+/* v25：对外接口——按当前 hp.start_jitter 重设起点（供 host 每轮调用）。
+ * 使用与 init 相同的独立 RNG 流，跨轮连续抽样；jitter=0 时严格旧行为。 */
+void net2_apply_start(NetworkState2* net) {
+    if (!net) return;
+    arm_set_start(&net->arm, net->hp.start_jitter);
+}
+
 /* ============================================================
  * 网络初始化
  * ============================================================ */
 int net2_init_ex(NetworkState2* net, int input_n, int hidden_n,
                  int motor1_n, int motor2_n, double avg_conn,
-                 unsigned int seed, int direct_fan, double hm_scale, double im_scale) {
+                 unsigned int seed, int direct_fan, double hm_scale, double im_scale,
+                 int ih_fan) {
     /* 参数下界：避免 grid_side-1 / motor_n-1 的除零，以及空网络 */
     if (!net || input_n < 2 || hidden_n < 1 || motor1_n < 2 || motor2_n < 2
-        || avg_conn < 1.0) return -1;
+        || avg_conn < 1.0 || ih_fan < 1) return -1;
     memset(net, 0, sizeof(NetworkState2));
     g_rand = seed;
     
@@ -283,7 +316,7 @@ int net2_init_ex(NetworkState2* net, int input_n, int hidden_n,
     /* v11（T2h 结构改动）：I→M 扇出可调；默认 12 时与旧容量估算逐位一致 */
     int fan1 = direct_fan < 0 ? 0 : (direct_fan > motor1_n ? motor1_n : direct_fan);
     int fan2 = direct_fan < 0 ? 0 : (direct_fan > motor2_n ? motor2_n : direct_fan);
-    long long upper = (long long)net->input_count * 20
+    long long upper = (long long)net->input_count * ih_fan
                     + (long long)hidden_n * (K / 2)
                     + (long long)hidden_n * K * 2
                     + (long long)net->input_count * fan1
@@ -300,7 +333,7 @@ int net2_init_ex(NetworkState2* net, int input_n, int hidden_n,
     for (i = 0; i < net->input_count; i++) {
         int pre = i;
         int hidden_base = net->input_count;
-        for (int k = 0; k < 20; k++) {  /* K=20（原 4），更密连接 */
+        for (int k = 0; k < ih_fan; k++) {  /* v24：默认 20 = 旧行为；--ih-fan 可调 I→H 感受野 */
             int post = hidden_base + (int)(r_u() * hidden_n);
             if (post >= hidden_base + hidden_n) continue;
             
@@ -574,6 +607,14 @@ int net2_init_ex(NetworkState2* net, int input_n, int hidden_n,
     net->hp.ei_w              = 0.0;
     net->hp.ei_tau            = 100.0;
     net->hp.ei_sigma          = 0.25;
+    /* v24（B2-fan/EMA）：默认 ih_fan=20 / decode_ema=0 ⇒ 旧路径逐位不变 */
+    net->hp.ih_fan            = ih_fan;
+    net->hp.decode_ema        = 0;
+    /* v25：start_jitter 默认 0（旧路径逐位不变）；起点 RNG 由主 seed 派生固定种子 */
+    net->hp.start_jitter      = 0.0;
+    start_seed(seed);
+    net->dec_ema1 = 0.0;
+    net->dec_ema2 = 0.0;
     net->ei_v  = (double*)calloc((size_t)EI_MAX_N, sizeof(double));
     net->ei_spk = (int*)calloc((size_t)EI_MAX_N, sizeof(int));
     if (!net->ei_v || !net->ei_spk) { net2_destroy(net); return -1; }
@@ -598,7 +639,8 @@ int net2_init_ex(NetworkState2* net, int input_n, int hidden_n,
     net->reward_history = (double*)calloc(net->hp.reward_baseline_window, sizeof(double));
     if (!net->reward_history) { net2_destroy(net); return -1; }
     
-    /* 关节臂初始状态 */
+    /* 关节臂初始状态（v25：init 时 hp.start_jitter 仍为默认 0，严格旧行为；
+     * host 在 init 后设置 start_jitter，实际起点由每轮 net2_episode_reset 应用） */
     net->arm.theta1 = 0.0;
     net->arm.theta2 = 0.0;
     net->arm.end_x = ARM_L1 + ARM_L2;
@@ -619,7 +661,7 @@ int net2_init(NetworkState2* net, int input_n, int hidden_n,
               int motor1_n, int motor2_n, double avg_conn,
               unsigned int seed) {
     return net2_init_ex(net, input_n, hidden_n, motor1_n, motor2_n,
-                        avg_conn, seed, 12, 1.0, 1.0);
+                        avg_conn, seed, 12, 1.0, 1.0, 20);
 }
 
 void net2_destroy(NetworkState2* net) {
@@ -1235,9 +1277,24 @@ void net2_tick(NetworkState2* net) {
     
     net->decoded_omega1 = omega1_cmd;
     net->decoded_omega2 = omega2_cmd;
-    
+
+    /* v24（B2-fan/EMA，2026-11-20 签字）：解码输出一阶低通 τ=decode_ema。
+     * 只作用于驱动臂的 omega；decoded_omega*（学习/诊断用）与 cf_err*（攀爬纤维）
+     * 仍用未平滑的原始解码值 ⇒ 学习信号零改动，纯解码侧操纵。
+     * decode_ema=0 时整段跳过 ⇒ 旧路径逐位不变。
+     * 实现位置注：预注册 §2 草案写的是 arm_step 内，实际放在 net2_tick 调用点，
+     * 等效且避免改 arm_step 公开语义与 ArmState 布局（报告偏离表记录）。 */
+    double drive1 = omega1_cmd, drive2 = omega2_cmd;
+    if (net->hp.decode_ema > 0) {
+        double alpha = 1.0 / (double)net->hp.decode_ema;
+        net->dec_ema1 += alpha * (drive1 - net->dec_ema1);
+        net->dec_ema2 += alpha * (drive2 - net->dec_ema2);
+        drive1 = net->dec_ema1;
+        drive2 = net->dec_ema2;
+    }
+
     /* Step 5: 物理模拟一步 */
-    arm_step(&net->arm, omega1_cmd, omega2_cmd);
+    arm_step(&net->arm, drive1, drive2);
 
     /* Step 5b: 攀爬纤维误差信号 —— 感觉目标误差 → 关节级运动指令误差
      * 生物学对应：小脑攀爬纤维在运动进行中（而非试次结束）传递感觉预测
@@ -1991,6 +2048,18 @@ int net2_set_param(NetworkState2* net, const char* name, double value) {
     } else if (b2_param_is(name, "ei_sigma")) {
         if (value <= 0.0 || value > 10.0) return -1;
         hp->ei_sigma = value;
+    } else if (b2_param_is(name, "decode_ema")) {
+        /* v24：0=关闭；1..200 = 低通 τ。只影响驱动臂，不改学习信号。 */
+        if (value < 0.0 || value > 200.0) return -1;
+        hp->decode_ema = (int)value;
+    } else if (b2_param_is(name, "ih_fan")) {
+        /* 只更新 hp 记录值；已建突触不重建，运行时改不产生效应。 */
+        if (value < 1.0 || value > 256.0) return -1;
+        hp->ih_fan = (int)value;
+    } else if (b2_param_is(name, "start_jitter")) {
+        /* v25：起点扰动幅度（rad），0=关闭；下一轮 episode_reset 起生效。 */
+        if (value < 0.0 || value > 1.0) return -1;
+        hp->start_jitter = value;
     } else {
         return -1;
     }
@@ -2046,6 +2115,9 @@ double net2_get_param(const NetworkState2* net, const char* name) {
     B2_GET("ei_tau", hp->ei_tau);
     B2_GET("ei_sigma", hp->ei_sigma);
     B2_GET("ei_drive_sum", net->ei_drive_sum);
+    B2_GET("ih_fan", (double)hp->ih_fan);
+    B2_GET("decode_ema", (double)hp->decode_ema);
+    B2_GET("start_jitter", hp->start_jitter);
     B2_GET("spike_count", (double)net->spike_count);
     B2_GET("cf_err1", net->cf_err1);
     B2_GET("cf_err2", net->cf_err2);
@@ -2056,13 +2128,11 @@ double net2_get_param(const NetworkState2* net, const char* name) {
 void net2_episode_reset(NetworkState2* net, double tx, double ty) {
     int i;
     if (!net) return;
-    /* 关节与末端归位；资格迹、奖励基线、权重全部保留，学习成果不丢 */
-    net->arm.theta1 = 0.0;
-    net->arm.theta2 = 0.0;
+    /* 关节与末端归位；资格迹、奖励基线、权重全部保留，学习成果不丢
+     * v25：起点按 start_jitter 扰动（独立 RNG，jitter=0 时严格旧行为 (0,0)/(2,0)）。 */
+    arm_set_start(&net->arm, net->hp.start_jitter);
     net->arm.omega1 = 0.0;
     net->arm.omega2 = 0.0;
-    net->arm.end_x = ARM_L1 + ARM_L2;
-    net->arm.end_y = 0.0;
     net->arm.max_reach = ARM_L1 + ARM_L2;
     net->arm.reward = 1.0;
     net->decoded_omega1 = 0.0;
@@ -2073,6 +2143,9 @@ void net2_episode_reset(NetworkState2* net, double tx, double ty) {
     net->cf_omega2_star = 0.0;
     net->cf_ema1 = 0.0;
     net->cf_ema2 = 0.0;
+    /* v24：解码低通状态每轮归零（默认关闭时写 0 不改任何参与计算的量） */
+    net->dec_ema1 = 0.0;
+    net->dec_ema2 = 0.0;
     net2_reset_ema();
     net2_set_target(net, tx, ty);
     for (i = 0; i < net->neuron_count; i++) {

@@ -76,6 +76,13 @@ double rho_target = 0.0;   /* v20：H→H 目标谱半径，0=关闭（旧行为
     double ei_tau  = 100.0;
     double ei_sigma = 0.25;
 
+    /* v24（B2-fan/EMA，2026-11-20 签字，audit/b2_fanema_prereg_2026-11-20.md）
+     * 默认 ih_fan=20 / decode_ema=0 ⇒ 旧路径逐位不变。 */
+    int    ih_fan     = 20;
+    int    decode_ema = 0;
+    /* v25（B2-startpose）：起始关节角扰动幅度（rad），默认 0 = 旧起点 (2,0) */
+    double start_jitter = 0.0;
+
     /* v18（B2-struct，2026-11-18 签字，audit/b2_struct_prereg_2026-11-18.md）
      * 0=关闭（默认，逐位不变） 1=活动依赖生长 2=随机生长（对照） 3=按索引补入度 */
     int    struct_mode     = 0;
@@ -261,6 +268,9 @@ int main(int argc, char* argv[]) {
         else if (a == "--ei-w")          nextf(cfg.ei_w);
         else if (a == "--ei-tau")        nextf(cfg.ei_tau);
         else if (a == "--ei-sigma")      nextf(cfg.ei_sigma);
+        else if (a == "--ih-fan")        next(cfg.ih_fan);
+        else if (a == "--decode-ema")    next(cfg.decode_ema);
+        else if (a == "--start-jitter")  nextf(cfg.start_jitter);
         else if (a == "--struct")        { if (i+1<argc) cfg.struct_mode = atoi(argv[++i]); }
         else if (a == "--struct-fmin")   { if (i+1<argc) cfg.struct_fmin = atoi(argv[++i]); }
         else if (a == "--struct-score")  { if (i+1<argc) cfg.struct_score = atoi(argv[++i]); }
@@ -338,7 +348,10 @@ int main(int argc, char* argv[]) {
                    "       [--load-readout FILE [--readout-layer hidden|input|both]] [--drive-direct]\n"
                    "       [--direct-fan N   I→M 每层扇出，默认 12 = 旧拓扑（T2h 结构改动）]\n"
                    "       [--hm-scale F     H→M 初始权重缩放，0 = 不建该通路（纯直通臂）]\n"
-                   "       [--rate-tau F     速率迹时间常数（tick，0=关）；配 --dump-values rate / --readout-values rate]\n", argv[0]);
+                   "       [--rate-tau F     速率迹时间常数（tick，0=关）；配 --dump-values rate / --readout-values rate]\n"
+                   "       [--ih-fan N       I→H 抽样条数，默认 20 = 旧拓扑（v24 B2-fan/EMA）]\n"
+                   "       [--decode-ema N  解码输出一阶低通 τ(tick)，0=关（默认，v24 B2-fan/EMA）]\n"
+                   "       [--start-jitter F 起始关节角均匀扰动幅度(rad)，0=关（默认，v25 B2-startpose）]\n", argv[0]);
             return 0;
         }
     }
@@ -371,6 +384,15 @@ int main(int argc, char* argv[]) {
                         "psp > 0, tau_trace >= 1, 1 <= wta-k <= 64\n");
         return 1;
     }
+    /* v24（B2-fan/EMA）：档位写死在预注册 §2；非法值直接拒绝，防事后调参。 */
+    if (cfg.ih_fan < 1 || cfg.ih_fan > 256 || cfg.decode_ema < 0 || cfg.decode_ema > 200) {
+        fprintf(stderr, "ih_fan must be in [1,256], decode_ema in [0,200]\n");
+        return 1;
+    }
+    if (cfg.start_jitter < 0.0 || cfg.start_jitter > 1.0) {
+        fprintf(stderr, "start_jitter must be in [0,1] rad\n");
+        return 1;
+    }
     if (cfg.speed_mode &&
         (cfg.step_cost < 0.0 || cfg.arrive_radius <= 0.0 ||
          cfg.arrive_bonus < 0.0 || cfg.speed_bonus < 0.0)) {
@@ -394,7 +416,7 @@ int main(int argc, char* argv[]) {
     static NetworkState2 net;
     if (net2_init_ex(&net, cfg.input_n, cfg.hidden_n, cfg.motor1_n, cfg.motor2_n,
                      cfg.avg_conn, cfg.seed, cfg.direct_fan, cfg.hm_scale,
-                     cfg.im_scale) != 0) {
+                     cfg.im_scale, cfg.ih_fan) != 0) {
         fprintf(stderr, "Init failed\n");
         return 1;
     }
@@ -458,6 +480,18 @@ int main(int argc, char* argv[]) {
     } else if (cfg.ei_mode == 1) {
         printf("v22 EI: mode=1 n=%d w=%.2f tau=%.1f (IIN uniform lateral inhibition)\n",
                cfg.ei_n, cfg.ei_w, cfg.ei_tau);
+    }
+    /* v24（B2-fan/EMA）：decode_ema 在 init 之后设置（只作用于 tick 解码，不重建拓扑）。
+     * ih_fan 已在 net2_init_ex 调用时生效，这里不再改写 hp（其值已由 init 写入）。 */
+    net.hp.decode_ema = cfg.decode_ema;
+    if (cfg.decode_ema > 0 || cfg.ih_fan != 20) {
+        printf("v24 fan/EMA: ih_fan=%d decode_ema=%d (tau=%d tick)\n",
+               cfg.ih_fan, cfg.decode_ema, cfg.decode_ema);
+    }
+    /* v25：start_jitter 在 init 后设置（起点由每轮 episode_reset 应用） */
+    net.hp.start_jitter = cfg.start_jitter;
+    if (cfg.start_jitter > 0.0) {
+        printf("v25 startpose: start_jitter=%.3f rad\n", cfg.start_jitter);
     }
     /* v18（B2-struct）：结构可塑开关（默认 0 ⇒ 旧路径逐位不变） */
     net.hp.struct_mode     = cfg.struct_mode;
@@ -657,6 +691,8 @@ int main(int argc, char* argv[]) {
                 cfg.alif_tau_a > 0.0 ? exp(-1.0 / cfg.alif_tau_a) : 0.0, cfg.alif_bpath);
         fprintf(mf, "  \"ei_mode\": %d, \"ei_n\": %d, \"ei_w\": %.2f, \"ei_tau\": %.1f, \"ei_sigma\": %.2f,\n",
                 cfg.ei_mode, cfg.ei_n, cfg.ei_w, cfg.ei_tau, cfg.ei_sigma);
+        fprintf(mf, "  \"ih_fan\": %d, \"decode_ema\": %d, \"start_jitter\": %.4f,\n",
+                cfg.ih_fan, cfg.decode_ema, cfg.start_jitter);
         fprintf(mf, "  \"preset\": \"%s\", \"decode_mode\": %d, \"wta_k\": %d, \"reward_mode\": %d,\n",
                 cfg.preset.c_str(), cfg.decode_mode, cfg.wta_k, cfg.reward_mode);
         fprintf(mf, "  \"use_reward_baseline\": %d, \"tau_trace\": %.1f, \"trace_clamp\": %.2f,\n",
@@ -700,13 +736,11 @@ int main(int argc, char* argv[]) {
                              (ep >= cfg.episodes - cfg.eval_episodes);
         net.use_reward_modulation = (rom_base == 0 || is_eval) ? 0 : 1;
         
-        /* 重置关节到初始位置 + EMA 平滑状态（含角速度/奖励/最大伸展） */
-        net.arm.theta1 = 0.0;
-        net.arm.theta2 = 0.0;
+        /* 重置关节到初始位置 + EMA 平滑状态（含角速度/奖励/最大伸展）
+         * v25：起点由 net2_apply_start 按 start_jitter 设置（jitter=0 时严格旧行为 (0,0)/(2,0)）。 */
+        net2_apply_start(&net);
         net.arm.omega1 = 0.0;
         net.arm.omega2 = 0.0;
-        net.arm.end_x = ARM_L1 + ARM_L2;
-        net.arm.end_y = 0.0;
         net.arm.max_reach = ARM_L1 + ARM_L2;
         net.arm.reward = 1.0;
         net2_reset_ema();

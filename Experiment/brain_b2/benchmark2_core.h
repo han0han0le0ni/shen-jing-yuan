@@ -231,6 +231,19 @@ typedef struct {
     double ei_tau;
     double ei_sigma;         /* v23 高斯选择性宽度（默认 0.25） */
 
+    /* v24（B2-fan/EMA，2026-11-20 签字，预注册 audit/b2_fanema_prereg_2026-11-20.md）：
+     * ih_fan = I→H 抽样条数（旧硬编码 20；默认 20 ⇒ 旧路径逐位不变，只允许 ≥1）；
+     * decode_ema = 解码输出一阶低通 τ（tick），0=关闭（默认，旧路径逐位不变）。
+     * EMA 只作用于驱动臂的 omega，不碰 decoded_omega / 攀爬纤维误差 / e-prop 学习信号。 */
+    int    ih_fan;           /* 默认 20 */
+    int    decode_ema;       /* 默认 0 */
+
+    /* v25（B2-startpose，2026-11-21 签字「a」，预注册 audit/b2_startpose_prereg_2026-11-21.md）：
+     * start_jitter = 每轮起始关节角的均匀扰动幅度（rad），θ1/θ2 独立 U(−j,+j)。
+     * 0 = 关闭 ⇒ 起点仍为 (0,0)/(2,0) 完全伸直位，旧路径逐位不变。
+     * 用独立 RNG 流，不消耗主 g_rand ⇒ j=0 时主随机序列零扰动。 */
+    double start_jitter;     /* 默认 0.0 */
+
 } HyperParams2;
 
 /* ============================================================
@@ -351,6 +364,10 @@ typedef struct {
     double* ei_v;            /* IIN 膜电位 [EI_MAX_N] */
     int*    ei_spk;          /* IIN 本 tick 是否发放 [EI_MAX_N] */
     double  ei_drive_sum;    /* 诊断：本 tick hidden→IIN 驱动和 */
+
+    /* v24（B2-fan/EMA）：解码输出低通状态（每关节一个），decode_ema>0 才读写；
+     * 初始 0，episode_reset 清零。默认关闭时整段跳过 ⇒ 旧路径逐位不变。 */
+    double  dec_ema1, dec_ema2;
 } NetworkState2;
 
 /* ============================================================
@@ -368,7 +385,14 @@ int  net2_init(NetworkState2* net, int input_n, int hidden_n,
  * net2_init(...) 等价于 net2_init_ex(..., 12, 1.0, 1.0)，旧路径逐位不变。 */
 int  net2_init_ex(NetworkState2* net, int input_n, int hidden_n,
                   int motor1_n, int motor2_n, double avg_conn,
-                  unsigned int seed, int direct_fan, double hm_scale, double im_scale);
+                  unsigned int seed, int direct_fan, double hm_scale, double im_scale,
+                  int ih_fan);
+/* v24：ih_fan = I→H 抽样条数，必须传 20 才与旧版逐位一致；详见 HyperParams2 注释。 */
+
+/* v25（B2-startpose）：按当前 hp.start_jitter 重设臂的起始关节角与末端正运动学。
+ * host 主循环每轮开始时调用（替代其内联的 theta=0/end=(2,0) 写死重置）；
+ * start_jitter=0 时写 (0,0)/(2,0)，与旧行为逐位一致。 */
+void net2_apply_start(NetworkState2* net);
 
 /* v20（B2-workpoint S2）：把 H→H 权重整体缩放到目标谱半径（幂迭代 + clamp 复算，≤3 轮）。
  * 返回 0 成功；rho_out 回填实测 ρ。只在 host 显式给 --rho-target>0 时调用。 */
